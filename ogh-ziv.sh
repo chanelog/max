@@ -140,7 +140,7 @@ THEMEF="$DIR/theme.conf"
 MLDB="$DIR/maxlogin.db"   # format: username|maxdevice
 BINARY_URL="https://github.com/fauzanihanipah/ziv-udp/releases/download/udp-zivpn/udp-zivpn-linux-amd64"
 CONFIG_URL="https://raw.githubusercontent.com/fauzanihanipah/ziv-udp/main/config.json"
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="1.3"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/ogh-ziv.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version.txt"
 
