@@ -382,8 +382,8 @@ draw_logo() {
     echo -e "  ${L5}${BLD}  ╚██████╔╝╚██████╔╝██║  ██║    ███████╗██║ ╚████╔╝   ${NC}"
     echo -e "  ${DIM}   ╚═════╝  ╚═════╝ ╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═══╝   ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
-    echo -e "  ${A4}      ✦  * SECURE VPN MANAGEMENT SYSTEM *  ✦      ${NC}"
-    echo -e "  ${DIM}  +---------------- ${A2}[ PREMIUM ]${DIM} ----------------+  ${NC}"
+    echo -e "  ${A4}        ✦  * SECURE VPN MANAGEMENT SYSTEM *  ✦      ${NC}"
+    echo -e "  ${DIM}    +---------------- ${A2}[ PREMIUM ]${DIM} ----------------+  ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
 }
 
