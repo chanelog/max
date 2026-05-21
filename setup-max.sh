@@ -122,7 +122,7 @@ UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
 SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
 OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
 
-SCRIPT_VERSION="1.6"
+SCRIPT_VERSION="1.7"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
@@ -401,8 +401,8 @@ draw_logo() {
     echo -e "  ${L5}${BLD}  ██║ ╚═╝ ██║██║  ██║██╔╝ ██╗    ██║     ██║  ██║██║ ╚████║ ${NC}"
     echo -e "  ${DIM}  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝    ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝ ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
-    echo -e "  ${A4}           ✦  * MAX PREMIUM TUNNELING PANEL *  ✦      ${NC}"
-    echo -e "  ${DIM}     +---------------- ${A2}[ ALL-IN-ONE ]${DIM} ---------------+  ${NC}"
+    echo -e "  ${A4}             ✦  * MAX PREMIUM TUNNELING PANEL *  ✦      ${NC}"
+    echo -e "  ${DIM}       +---------------- ${A2}[ ALL-IN-ONE ]${DIM} ---------------+  ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
 }
 
@@ -4252,7 +4252,7 @@ main_menu() {
         show_header
 
         echo -e "  ${A1}${_DASH}${NC}"
-        echo -e      "  ${A1}+-------------- ${BLD}${AL}MAX PANEL MAIN MENU${NC} ${A1}--------------+${NC}"
+        echo -e "  ${A1}     +-------------- ${BLD}${AL}MAX PANEL MAIN MENU${NC} ${A1}--------------+${NC}"
         echo -e "  ${A1}${_DASH}${NC}"
         echo ""
 
