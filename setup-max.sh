@@ -122,7 +122,7 @@ UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
 SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
 OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
 
-SCRIPT_VERSION="1.3"
+SCRIPT_VERSION="1.4"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
@@ -4256,7 +4256,7 @@ main_menu() {
         echo -e "  ${A1}${_DASH}${NC}"
         echo ""
 
-        _r2 "${A2}" "[1]  🛡  SSH / OpenSSH       " "${A2}" "[2]  🔐  OpenVPN"
+        _r2 "${A2}" "[1]  🛡  SSH / OpenSSH      " "${A2}" "[2]  🔐  OpenVPN"
         echo -e "  ${A1}${_DASH}${NC}"
         _r2 "${A2}" "[3]  🟣  Xray (VMess/VL/TR) " "${A2}" "[4]  ⚡  Trojan-Go"
         echo -e "  ${A1}${_DASH}${NC}"
@@ -4270,7 +4270,7 @@ main_menu() {
         echo -e "  ${A1}${_DASH}${NC}"
         _r2 "${A2}" "[13] ℹ️   About             " "${A4}" "[14] 🚀 Install Ulang"
         echo -e "  ${A1}${_DASH}${NC}"
-        _r2 "${LR}" "[E]  🗑  Uninstall           " "${LR}" "[X]  ✗   Keluar"
+        _r2 "${LR}" "[E]  🗑  Uninstall          " "${LR}" "[X]  ✗   Keluar"
         echo -e "  ${A1}${_DASH}${NC}"
         echo -e "  ${DIM}                ✦  MAX PANEL v${SCRIPT_VERSION}  ✦                ${NC}"
         echo ""
