@@ -202,6 +202,29 @@ _bot()  { echo -e "  ${A1}${_DASH}${NC}"; }
 _sep()  { echo -e "  ${A1}${_DASH}${NC}"; }
 _btn()  { printf "  %b\n" "$1"; }
 
+# ════════════════════════════════════════════════════════════
+#  IDEMPOTENT CONFIG-BLOCK HELPER
+# ────────────────────────────────────────────────────────────
+#  _apply_block <marker> <file>  → stdin = body
+#  Hapus block lama yang dibrackit `# >>> MAXPANEL-<marker> >>>`
+#  / `# <<< MAXPANEL-<marker> <<<` lalu tulis ulang.
+#  Aman untuk dipanggil berkali-kali (re-run installer).
+# ════════════════════════════════════════════════════════════
+_apply_block() {
+    local marker="$1" file="$2"
+    [[ -z "$marker" || -z "$file" ]] && return 1
+    [[ ! -f "$file" ]] && { mkdir -p "$(dirname "$file")"; : > "$file"; }
+    # Hapus block lama dengan marker yang sama (idempotent)
+    sed -i "/^# >>> MAXPANEL-${marker} >>>$/,/^# <<< MAXPANEL-${marker} <<<$/d" "$file" 2>/dev/null
+    # Append block baru
+    {
+        echo ""
+        echo "# >>> MAXPANEL-${marker} >>>"
+        cat
+        echo "# <<< MAXPANEL-${marker} <<<"
+    } >> "$file"
+}
+
 get_ip() {
     local ip
     for src in \
@@ -513,11 +536,11 @@ show_box_ssh() {
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} 🖥  ${DIM}IP Publik${NC} : ${LG}%s${NC}\n" "$ip"
     printf  "  ${A1}│${NC} 🌐 ${DIM}Host    ${NC} : ${W}%s${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}Port SSH ${NC}: ${Y}22, 80, 443${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}Port SSH ${NC}: ${Y}22${NC}\n"
     printf  "  ${A1}│${NC} 🔌 ${DIM}Dropbear ${NC}: ${Y}109, 143${NC}\n"
-    printf  "  ${A1}│${NC} 🔒 ${DIM}SSL/Stun.${NC}: ${Y}443, 445, 777${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}80, 8880, 2095${NC}\n"
-    printf  "  ${A1}│${NC} 🔒 ${DIM}WS HTTPS ${NC}: ${Y}443, 2096${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}SSL/Stun.${NC}: ${Y}445, 777${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}80 (/ws-ssh)${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}WS HTTPS ${NC}: ${Y}443 (/ws-ssh)${NC}\n"
     printf  "  ${A1}│${NC} 📡 ${DIM}OpenVPN  ${NC}: ${Y}TCP 1194 / UDP 2200${NC}\n"
     printf  "  ${A1}│${NC} 📡 ${DIM}UDPGW    ${NC}: ${Y}7100, 7200, 7300${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
@@ -592,18 +615,23 @@ install_deps() {
 #  INSTALLER — SSH + Dropbear + Stunnel
 # ════════════════════════════════════════════════════════════
 install_ssh() {
-    inf "Konfigurasi OpenSSH (port 22, 80, 443)..."
-    # Hindari overwrite kalau sudah ada port custom
-    if ! grep -q '^Port 80' /etc/ssh/sshd_config 2>/dev/null; then
+    inf "Konfigurasi OpenSSH (port 22 only — 80/443 dihandle Nginx, 445/777 oleh Stunnel)..."
+    # FIX: SSH cukup di port 22. Port 80 = Nginx, port 443 = Nginx.
+    # Pakai marker idempotent agar re-run aman dan tidak menumpuk baris Port.
+    # Pertama: pastikan ada "Port 22" baseline di sshd_config (cari atau set)
+    if ! grep -qE '^Port[[:space:]]+22$' /etc/ssh/sshd_config 2>/dev/null; then
         sed -i 's/^#\?Port .*/Port 22/' /etc/ssh/sshd_config 2>/dev/null
-        echo "Port 80"  >> /etc/ssh/sshd_config
-        echo "Port 443" >> /etc/ssh/sshd_config
+        grep -qE '^Port[[:space:]]+22$' /etc/ssh/sshd_config 2>/dev/null || \
+            echo "Port 22" >> /etc/ssh/sshd_config
     fi
+    # Bersihkan baris "Port 80" / "Port 443" jika ada (sisa install lama)
+    sed -i '/^Port[[:space:]]\+80$/d'  /etc/ssh/sshd_config 2>/dev/null
+    sed -i '/^Port[[:space:]]\+443$/d' /etc/ssh/sshd_config 2>/dev/null
     # PermitRoot login & password auth (sesuaikan)
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-    ok "OpenSSH siap: 22, 80, 443"
+    ok "OpenSSH siap: 22 (80/443 dilayani Nginx, 445/777 oleh Stunnel)"
 
     # ── Dropbear ─────────────────────────────────────────────────────────
     inf "Konfigurasi Dropbear (port 109, 143)..."
@@ -622,14 +650,16 @@ install_ssh() {
     ok "Dropbear siap: 109, 143"
 
     # ── Stunnel SSL ─────────────────────────────────────────────────────────
-    inf "Konfigurasi Stunnel SSL (port 443/445/777)..."
+    # FIX: port 443 dihandle Nginx (TLS termination). Stunnel HANYA listen di 445 & 777.
+    inf "Konfigurasi Stunnel SSL (port 445 → Dropbear:109, 777 → OpenSSH:22)..."
     mkdir -p /etc/stunnel
     if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
         openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
             -subj "/C=ID/ST=JKT/L=Jakarta/O=MAX/OU=Panel/CN=maxpanel" \
             -keyout /etc/stunnel/key.pem -out /etc/stunnel/cert.pem &>/dev/null
         cat /etc/stunnel/key.pem /etc/stunnel/cert.pem > /etc/stunnel/stunnel.pem
-        chmod 600 /etc/stunnel/stunnel.pem
+        chmod 600 /etc/stunnel/key.pem /etc/stunnel/stunnel.pem
+        chmod 644 /etc/stunnel/cert.pem
     fi
     cat > /etc/stunnel/stunnel.conf <<'STUN'
 cert = /etc/stunnel/stunnel.pem
@@ -637,10 +667,6 @@ client = no
 socket = a:SO_REUSEADDR=1
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
-
-[dropbear-ssl-443]
-accept = 443
-connect = 127.0.0.1:109
 
 [dropbear-ssl-445]
 accept = 445
@@ -650,12 +676,13 @@ connect = 127.0.0.1:109
 accept = 777
 connect = 127.0.0.1:22
 STUN
+    chmod 600 /etc/stunnel/stunnel.pem 2>/dev/null
     # Aktifkan stunnel
     sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/stunnel4 2>/dev/null
     [[ -f /etc/default/stunnel4 ]] || echo "ENABLED=1" > /etc/default/stunnel4
     systemctl enable stunnel4 &>/dev/null
     systemctl restart stunnel4 2>/dev/null
-    ok "Stunnel SSL siap: 443, 445, 777"
+    ok "Stunnel SSL siap: 445, 777"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -691,11 +718,15 @@ install_xray() {
         openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
             -subj "/CN=${dom}" \
             -keyout "$XRAY_KEY" -out "$XRAY_CRT" &>/dev/null
-        chmod 644 "$XRAY_CRT" "$XRAY_KEY"
+        # FIX: private key WAJIB 600. Certificate publik boleh 644.
+        chmod 644 "$XRAY_CRT"
+        chmod 600 "$XRAY_KEY"
     fi
 
     # Konfigurasi Xray
-    inf "Tulis konfigurasi Xray (multi-inbound)..."
+    # FIX: konsolidasi ke 5 inbound (10001-10005) + SS @ 8388 sesuai spec port architecture.
+    # Semua WS/gRPC inbound listen di 127.0.0.1, TLS terminasi di Nginx pada port 443.
+    inf "Tulis konfigurasi Xray (5 inbound + SS)..."
     cat > "$XRAY_CFG" <<'XCFG'
 {
   "log": {
@@ -705,55 +736,35 @@ install_xray() {
   },
   "inbounds": [
     {
-      "port": 10001, "listen": "127.0.0.1", "protocol": "vless",
-      "settings": {"clients": [], "decryption": "none"},
-      "streamSettings": {"network": "ws", "wsSettings": {"path": "/vless"}},
+      "port": 10001, "listen": "127.0.0.1", "protocol": "vmess",
+      "settings": {"clients": []},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/vmess"}},
       "sniffing": {"enabled": true, "destOverride": ["http","tls"]},
-      "tag": "vless-ws-nontls"
+      "tag": "vmess-ws"
     },
     {
       "port": 10002, "listen": "127.0.0.1", "protocol": "vless",
       "settings": {"clients": [], "decryption": "none"},
-      "streamSettings": {
-        "network": "ws", "security": "none",
-        "wsSettings": {"path": "/vless"}
-      },
-      "tag": "vless-ws-tls"
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/vless"}},
+      "sniffing": {"enabled": true, "destOverride": ["http","tls"]},
+      "tag": "vless-ws"
     },
     {
-      "port": 10003, "listen": "127.0.0.1", "protocol": "vless",
-      "settings": {"clients": [], "decryption": "none"},
-      "streamSettings": {
-        "network": "grpc", "security": "none",
-        "grpcSettings": {"serviceName": "vless-grpc"}
-      },
-      "tag": "vless-grpc"
-    },
-    {
-      "port": 10004, "listen": "127.0.0.1", "protocol": "vmess",
-      "settings": {"clients": []},
-      "streamSettings": {"network": "ws", "wsSettings": {"path": "/vmess"}},
-      "tag": "vmess-ws-nontls"
-    },
-    {
-      "port": 10005, "listen": "127.0.0.1", "protocol": "vmess",
-      "settings": {"clients": []},
-      "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/vmess"}},
-      "tag": "vmess-ws-tls"
-    },
-    {
-      "port": 10006, "listen": "127.0.0.1", "protocol": "trojan",
+      "port": 10003, "listen": "127.0.0.1", "protocol": "trojan",
       "settings": {"clients": []},
       "streamSettings": {"network": "ws", "wsSettings": {"path": "/trojan-ws"}},
       "tag": "trojan-ws"
     },
     {
-      "port": 10007, "listen": "127.0.0.1", "protocol": "trojan",
+      "port": 10004, "listen": "127.0.0.1", "protocol": "vless",
+      "settings": {"clients": [], "decryption": "none"},
+      "streamSettings": {"network": "grpc", "grpcSettings": {"serviceName": "vless-grpc"}},
+      "tag": "vless-grpc"
+    },
+    {
+      "port": 10005, "listen": "127.0.0.1", "protocol": "trojan",
       "settings": {"clients": []},
-      "streamSettings": {
-        "network": "grpc", "security": "none",
-        "grpcSettings": {"serviceName": "trojan-grpc"}
-      },
+      "streamSettings": {"network": "grpc", "grpcSettings": {"serviceName": "trojan-grpc"}},
       "tag": "trojan-grpc"
     },
     {
@@ -830,6 +841,9 @@ install_trojan_go() {
             -subj "/CN=${dom}" \
             -keyout "$TROJANGO_DIR/server.key" \
             -out    "$TROJANGO_DIR/server.crt" &>/dev/null
+        # FIX: private key 600, cert 644
+        chmod 644 "$TROJANGO_DIR/server.crt"
+        chmod 600 "$TROJANGO_DIR/server.key"
     fi
 
     cat > "$TROJANGO_CFG" <<'TGCFG'
@@ -908,6 +922,9 @@ install_hysteria() {
             -subj "/CN=${dom}" \
             -keyout "$HY_DIR/server.key" \
             -out    "$HY_DIR/server.crt" &>/dev/null
+        # FIX: private key 600, cert 644
+        chmod 644 "$HY_DIR/server.crt"
+        chmod 600 "$HY_DIR/server.key"
     fi
 
     cat > "$HY_CFG" <<'HYCFG'
@@ -1045,6 +1062,11 @@ install_openvpn() {
         cp "$ER/pki/issued/server.crt" /etc/openvpn/server/server.crt
         cp "$ER/pki/private/server.key" /etc/openvpn/server/server.key
         cp "$ER/pki/dh.pem"          /etc/openvpn/server/dh.pem
+        # FIX: lock down semua private key OpenVPN ke 600 (server.key, ta.key, CA private key)
+        chmod 600 /etc/openvpn/server/server.key /etc/openvpn/server/ta.key 2>/dev/null
+        chmod 644 /etc/openvpn/server/ca.crt /etc/openvpn/server/server.crt /etc/openvpn/server/dh.pem 2>/dev/null
+        chmod 600 "$ER/pki/private/ca.key" "$ER/pki/private/server.key" 2>/dev/null
+        chmod -R go-rwx "$ER/pki/private" 2>/dev/null
         cd - >/dev/null || true
         ok "OpenVPN PKI dibuat"
     else
@@ -1116,6 +1138,10 @@ OVPNUDP
 
     # Forwarding & NAT
     sed -i 's|^#\?net.ipv4.ip_forward.*|net.ipv4.ip_forward=1|' /etc/sysctl.conf 2>/dev/null
+    # FIX idempotent: pastikan ip_forward via marker block (re-run aman)
+    _apply_block "OPENVPN-FORWARD" /etc/sysctl.conf <<'OVPNSC'
+net.ipv4.ip_forward=1
+OVPNSC
     sysctl -p &>/dev/null
     local IFACE; IFACE=$(get_iface)
     iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -o "$IFACE" -j MASQUERADE 2>/dev/null \
@@ -1145,9 +1171,11 @@ install_wireguard() {
         local privk pubk
         privk=$(wg genkey)
         pubk=$(echo "$privk" | wg pubkey)
-        echo "$privk" > "$WG_DIR/server_private.key"
+        # Write key dengan umask ketat agar tidak race-condition 644 sebelum chmod
+        ( umask 077; echo "$privk" > "$WG_DIR/server_private.key" )
         echo "$pubk"  > "$WG_DIR/server_public.key"
         chmod 600 "$WG_DIR/server_private.key"
+        chmod 644 "$WG_DIR/server_public.key"
     fi
 
     local IFACE SPRIV
@@ -1166,6 +1194,10 @@ WGCFG
     chmod 600 "$WG_CFG"
 
     sed -i 's|^#\?net.ipv4.ip_forward.*|net.ipv4.ip_forward=1|' /etc/sysctl.conf
+    # FIX idempotent: marker block utk ip_forward (boleh overlap dengan OpenVPN, sed di atas tetap normalize)
+    _apply_block "WG-FORWARD" /etc/sysctl.conf <<'WGSC'
+net.ipv4.ip_forward=1
+WGSC
     sysctl -p &>/dev/null
     systemctl enable wg-quick@wg0 &>/dev/null
     systemctl restart wg-quick@wg0 2>/dev/null
@@ -1242,11 +1274,12 @@ install_ws_proxy() {
     cat > "$WS_BIN" <<'WSPY'
 #!/usr/bin/env python3
 # MAX WS Proxy — HTTP CONNECT/Injector style proxy
-# Listens on port, accepts HTTP CONNECT/GET, forwards raw TCP to SSH backend.
+# Listens on 127.0.0.1:<port>, accepts HTTP upgrade, forwards raw TCP to SSH/Dropbear backend.
+# Dipakai sebagai backend untuk Nginx (path /ws-ssh). Tidak listen public.
 import socket, threading, select, sys, signal
 
-LISTEN_HOST = '0.0.0.0'
-LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
+LISTEN_HOST = '127.0.0.1'
+LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8880
 DEFAULT_TARGET = ('127.0.0.1', 22)
 RESPONSE = b'HTTP/1.1 200 OK\r\nServer: MAX-WS\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'
 BUFLEN  = 8192
@@ -1346,48 +1379,55 @@ if __name__ == '__main__':
 WSPY
     chmod +x "$WS_BIN"
 
-    # Systemd services untuk masing-masing port WS
-    for port in 80 8880 2095; do
-        cat > "/etc/systemd/system/ws-max-${port}.service" <<WSSVC
+    # Systemd: HANYA satu WS proxy di 127.0.0.1:8880 (akan di-reverse-proxy oleh Nginx via /ws-ssh)
+    # FIX: hapus listener pada port 80 dan 2095 (clash dengan Nginx + public exposure tanpa Nginx).
+    # Sekaligus hapus service lama (ws-max-80, ws-max-2095) bila ada sisa install sebelumnya.
+    for stale in /etc/systemd/system/ws-max-80.service /etc/systemd/system/ws-max-2095.service; do
+        if [[ -f "$stale" ]]; then
+            local svc; svc=$(basename "$stale" .service)
+            systemctl stop    "$svc" 2>/dev/null
+            systemctl disable "$svc" 2>/dev/null
+            rm -f "$stale"
+        fi
+    done
+    cat > /etc/systemd/system/ws-max-8880.service <<WSSVC
 [Unit]
-Description=MAX WS Proxy Port ${port}
+Description=MAX WS Proxy (internal 127.0.0.1:8880, reverse-proxied by Nginx)
 After=network.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 $WS_BIN ${port}
+ExecStart=/usr/bin/python3 $WS_BIN 8880
 Restart=on-failure
 RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 WSSVC
-        systemctl enable "ws-max-${port}" &>/dev/null
-        systemctl restart "ws-max-${port}" 2>/dev/null
-    done
+    systemctl daemon-reload
+    systemctl enable  ws-max-8880 &>/dev/null
+    systemctl restart ws-max-8880 2>/dev/null
 
-    # WS over TLS (stunnel forward 443/2096 → 80)
-    cat >> /etc/stunnel/stunnel.conf <<'WSSTL'
+    # FIX: TIDAK lagi append stunnel WS-TLS sections. Nginx terminasi TLS di port 443.
+    # Hapus block stunnel WS-TLS lama (idempotent) bila tertinggal dari versi sebelumnya.
+    if [[ -f /etc/stunnel/stunnel.conf ]]; then
+        # Hapus pakai marker (versi baru) dan section lama (versi lama tanpa marker)
+        sed -i '/^# >>> MAXPANEL-WS-STUNNEL >>>$/,/^# <<< MAXPANEL-WS-STUNNEL <<<$/d' /etc/stunnel/stunnel.conf 2>/dev/null
+        # Legacy cleanup (sebelum marker dipakai)
+        sed -i '/^\[ws-tls-443\]/,/^$/d' /etc/stunnel/stunnel.conf 2>/dev/null
+        sed -i '/^\[ws-tls-2096\]/,/^$/d' /etc/stunnel/stunnel.conf 2>/dev/null
+        systemctl restart stunnel4 2>/dev/null
+    fi
 
-[ws-tls-443]
-accept = 4443
-connect = 127.0.0.1:80
-
-[ws-tls-2096]
-accept = 2096
-connect = 127.0.0.1:80
-WSSTL
-    systemctl restart stunnel4 2>/dev/null
-
-    ok "WS proxy aktif: HTTP 80, 8880, 2095 — TLS 4443, 2096"
+    ok "WS proxy aktif di 127.0.0.1:8880 (path /ws-ssh → Nginx 80/443)"
 }
 
 # ════════════════════════════════════════════════════════════
 #  INSTALLER — Nginx reverse-proxy (path-routing untuk Xray)
 # ════════════════════════════════════════════════════════════
 install_nginx() {
-    inf "Install Nginx + reverse-proxy path-routing..."
+    inf "Install Nginx + reverse-proxy path-routing (80/443 + 8443 alt-TLS)..."
     if ! command -v nginx &>/dev/null; then
         apt-get install -y -qq nginx 2>/dev/null
     fi
@@ -1395,106 +1435,180 @@ install_nginx() {
 
     local dom; dom=$(get_domain)
 
-    # Remove default
+    # Remove default site (akan dipegang config kita)
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null
 
+    # FIX: Nginx sekarang listen di 80 (HTTP) + 443 (TLS) + 8443 (alt-TLS).
+    # Semua path Xray + WS-SSH dirutekan dari sini. SSH/Dropbear/Stunnel TIDAK pakai 80/443.
+    #
+    # Xray inbound mapping (semua 127.0.0.1):
+    #   /vmess       \u2192 10001  (VMess WS)
+    #   /vless       \u2192 10002  (VLess WS)
+    #   /trojan-ws   \u2192 10003  (Trojan WS)
+    #   /vless-grpc  \u2192 10004  (VLess gRPC)  \u2014 hanya di server TLS
+    #   /trojan-grpc \u2192 10005  (Trojan gRPC) \u2014 hanya di server TLS
+    #   /ws-ssh      \u2192 8880   (SSH-over-WS via python proxy)
     cat > /etc/nginx/conf.d/xray.conf <<NGX
-# MAX PANEL — Xray reverse-proxy
+# MAX PANEL \u2014 Xray reverse-proxy (HTTP 80 + TLS 443 + alt-TLS 8443)
+# === SHARED PROXY HEADERS ===========================================
+map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
+
+# === HTTP 80 (plain) =================================================
 server {
-    listen 81;
-    listen [::]:81;
-    server_name ${dom};
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name ${dom} _;
     root /var/www/html;
     index index.html;
 
-    # VMess WS
     location = /vmess {
-        if (\$http_upgrade != "websocket") { return 404; }
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:10004;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
-
-    # VLess WS
-    location = /vless {
         if (\$http_upgrade != "websocket") { return 404; }
         proxy_redirect off;
         proxy_pass http://127.0.0.1:10001;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_read_timeout 300s;
     }
 
-    # Trojan WS
+    location = /vless {
+        if (\$http_upgrade != "websocket") { return 404; }
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:10002;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_read_timeout 300s;
+    }
+
     location = /trojan-ws {
         if (\$http_upgrade != "websocket") { return 404; }
         proxy_redirect off;
-        proxy_pass http://127.0.0.1:10006;
+        proxy_pass http://127.0.0.1:10003;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_read_timeout 300s;
+    }
+
+    # SSH-over-WebSocket (Nginx \u2192 python WS proxy \u2192 SSH:22 / Dropbear:109)
+    location = /ws-ssh {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:8880;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_read_timeout 7200s;
+        proxy_buffering off;
     }
 
     location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
 }
 
+# === TLS 443 (primary) ===============================================
 server {
-    listen 8443 ssl http2;
-    listen [::]:8443 ssl http2;
-    server_name ${dom};
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${dom} _;
 
     ssl_certificate     /etc/xray/xray.crt;
     ssl_certificate_key /etc/xray/xray.key;
     ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
 
     # gRPC VLess
     location ^~ /vless-grpc {
-        grpc_pass grpc://127.0.0.1:10003;
+        grpc_pass grpc://127.0.0.1:10004;
         grpc_set_header Host \$host;
         client_max_body_size 0;
     }
 
     # gRPC Trojan
     location ^~ /trojan-grpc {
-        grpc_pass grpc://127.0.0.1:10007;
+        grpc_pass grpc://127.0.0.1:10005;
         grpc_set_header Host \$host;
         client_max_body_size 0;
     }
 
-    # Fallback WS over TLS (juga support /vmess /vless /trojan-ws)
+    # WS over TLS (Nginx terminates TLS, forward plaintext WS ke Xray internal)
     location = /vmess {
-        proxy_pass http://127.0.0.1:10005;
+        proxy_pass http://127.0.0.1:10001;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_read_timeout 300s;
     }
     location = /vless {
         proxy_pass http://127.0.0.1:10002;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_read_timeout 300s;
     }
     location = /trojan-ws {
-        proxy_pass http://127.0.0.1:10006;
+        proxy_pass http://127.0.0.1:10003;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_read_timeout 300s;
+    }
+    location = /ws-ssh {
+        proxy_pass http://127.0.0.1:8880;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_read_timeout 7200s;
+        proxy_buffering off;
     }
 
     location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
 }
+
+# === Alt-TLS 8443 (backup listener, sama dengan 443) =================
+server {
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
+    server_name ${dom} _;
+
+    ssl_certificate     /etc/xray/xray.crt;
+    ssl_certificate_key /etc/xray/xray.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location ^~ /vless-grpc {
+        grpc_pass grpc://127.0.0.1:10004;
+        grpc_set_header Host \$host;
+        client_max_body_size 0;
+    }
+    location ^~ /trojan-grpc {
+        grpc_pass grpc://127.0.0.1:10005;
+        grpc_set_header Host \$host;
+        client_max_body_size 0;
+    }
+    location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /ws-ssh    { proxy_pass http://127.0.0.1:8880;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_buffering off; }
+    location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
+}
 NGX
 
-    nginx -t &>/dev/null && systemctl restart nginx 2>/dev/null
-    is_up nginx && ok "Nginx aktif (port 81 HTTP + 8443 HTTPS)" || warn "Nginx belum aktif"
+    # Test config dulu, baru restart (jangan break Nginx existing)
+    if nginx -t &>/dev/null; then
+        systemctl enable nginx &>/dev/null
+        systemctl restart nginx 2>/dev/null
+        is_up nginx && ok "Nginx aktif (80 HTTP + 443/8443 TLS)" || warn "Nginx belum aktif"
+    else
+        err "Konfigurasi Nginx INVALID \u2014 cek: nginx -t"
+        nginx -t 2>&1 | tail -10 | while read -r ln; do warn "  $ln"; done
+    fi
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1620,14 +1734,16 @@ do_install_all() {
     echo -e "  ${A1}${_DASH}${NC}"
     echo -e "  ${BLD}${A4}  Daftar Protokol & Port${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
-    printf  "  ${A3}•${NC} OpenSSH         : ${Y}22, 80, 443${NC}\n"
+    printf  "  ${A3}•${NC} OpenSSH         : ${Y}22${NC}\n"
     printf  "  ${A3}•${NC} Dropbear        : ${Y}109, 143${NC}\n"
-    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}443, 445, 777${NC}\n"
-    printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}80, 8880, 2095 HTTP — 2096, 4443 TLS${NC}\n"
+    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}445, 777${NC}\n"
+    printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}80${NC}  — paths: /vmess /vless /trojan-ws /ws-ssh\n"
+    printf  "  ${A3}•${NC} Nginx (TLS)     : ${Y}443${NC}, ${Y}8443${NC} alt — + /vless-grpc /trojan-grpc\n"
+    printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}/ws-ssh${NC} (→ internal 127.0.0.1:8880)\n"
     printf  "  ${A3}•${NC} OpenVPN         : ${Y}TCP 1194, UDP 2200${NC}\n"
     printf  "  ${A3}•${NC} Xray VMess WS   : ${Y}/vmess (80, 443)${NC}\n"
-    printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (80, 443) + gRPC 8443${NC}\n"
-    printf  "  ${A3}•${NC} Xray Trojan     : ${Y}/trojan-ws (443) + gRPC 8443${NC}\n"
+    printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (80, 443)${NC} + gRPC ${Y}443${NC}\n"
+    printf  "  ${A3}•${NC} Xray Trojan     : ${Y}/trojan-ws (443)${NC} + gRPC ${Y}443${NC}\n"
     printf  "  ${A3}•${NC} Shadowsocks-22  : ${Y}8388${NC}\n"
     printf  "  ${A3}•${NC} Trojan-Go       : ${Y}2087${NC}\n"
     printf  "  ${A3}•${NC} BadVPN UDPGW    : ${Y}7100, 7200, 7300${NC}\n"
@@ -1657,30 +1773,34 @@ gen_selfsigned_ssl() {
         openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
             -subj "/CN=${dom}" \
             -keyout /etc/xray/xray.key -out /etc/xray/xray.crt &>/dev/null
+        # FIX: private key WAJIB 600
+        chmod 644 /etc/xray/xray.crt
+        chmod 600 /etc/xray/xray.key
     fi
-    # Copy ke service lain
+    # Copy ke service lain (preserve perm 600 untuk key)
     cp -f /etc/xray/xray.crt /etc/hysteria/server.crt 2>/dev/null
     cp -f /etc/xray/xray.key /etc/hysteria/server.key 2>/dev/null
     cp -f /etc/xray/xray.crt /etc/trojan-go/server.crt 2>/dev/null
     cp -f /etc/xray/xray.key /etc/trojan-go/server.key 2>/dev/null
+    chmod 644 /etc/hysteria/server.crt /etc/trojan-go/server.crt 2>/dev/null
+    chmod 600 /etc/hysteria/server.key /etc/trojan-go/server.key 2>/dev/null
     ok "SSL self-signed siap (CN=${dom})"
 }
 
 # ── BBR silent (panggil dari installer) ─────────────────────────────────────────────────────────
 enable_bbr_silent() {
     modprobe tcp_bbr 2>/dev/null
-    grep -q 'tcp_bbr' /etc/modules-load.d/modules.conf 2>/dev/null || \
-        echo "tcp_bbr" >> /etc/modules-load.d/modules.conf 2>/dev/null
+    # FIX: pakai marker idempotent (re-run aman, tidak duplikat baris)
+    _apply_block "BBR-MODULE" /etc/modules-load.d/maxpanel.conf <<'BBRMOD'
+tcp_bbr
+BBRMOD
     sysctl -w net.core.default_qdisc=fq           &>/dev/null
     sysctl -w net.ipv4.tcp_congestion_control=bbr &>/dev/null
-    for kv in \
-        "net.core.default_qdisc=fq" \
-        "net.ipv4.tcp_congestion_control=bbr" \
-        "net.ipv4.ip_forward=1"
-    do
-        local k="${kv%%=*}"
-        grep -q "$k" /etc/sysctl.conf 2>/dev/null || echo "$kv" >> /etc/sysctl.conf
-    done
+    _apply_block "BBR-SYSCTL" /etc/sysctl.conf <<'BBRSYS'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.ip_forward=1
+BBRSYS
     sysctl -p &>/dev/null
 }
 
@@ -1921,13 +2041,13 @@ def ss_clients():
     for u in parse_users(os.path.join(DIR,"ss-users.db")):
         out.append({"password": u[1], "method":"aes-128-gcm", "email": u[0]})
     return out
-# VLess
-for tag in ("vless-ws-nontls","vless-ws-tls","vless-grpc"):
+# VLess (single WS inbound + single gRPC inbound \u2014 TLS dipisah ke Nginx)
+for tag in ("vless-ws","vless-grpc"):
     set_inbound(tag, vless_clients())
-# VMess
-for tag in ("vmess-ws-nontls","vmess-ws-tls"):
+# VMess (single WS inbound)
+for tag in ("vmess-ws",):
     set_inbound(tag, vmess_clients())
-# Trojan
+# Trojan (WS + gRPC)
 for tag in ("trojan-ws","trojan-grpc"):
     set_inbound(tag, trojan_clients())
 # SS
@@ -2079,7 +2199,10 @@ vless_add() {
     echo -e "  ${LG}vless://${uuid}@${dom}:80?path=/vless&encryption=none&host=${dom}&type=ws#${u}-HTTP${NC}"
     echo ""
     echo -e "  ${DIM}🔗 Link VLess gRPC TLS:${NC}"
-    echo -e "  ${LG}vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC${NC}"
+    echo -e "  ${LG}vless://${uuid}@${dom}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC${NC}"
+    echo ""
+    echo -e "  ${DIM}🔗 Link VLess gRPC alt-TLS (port 8443):${NC}"
+    echo -e "  ${DIM}vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
     _tg_send "✅ <b>VLess Baru — MAX</b>
 👤 <code>${u}</code>  🔑 <code>${uuid}</code>  📅 ${exp}"
@@ -2161,7 +2284,10 @@ trojan_add() {
     echo -e "  ${LG}trojan://${p}@${dom}:443?path=/trojan-ws&security=tls&host=${dom}&type=ws&sni=${dom}#${u}-WS${NC}"
     echo ""
     echo -e "  ${DIM}🔗 Link Trojan gRPC TLS:${NC}"
-    echo -e "  ${LG}trojan://${p}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC${NC}"
+    echo -e "  ${LG}trojan://${p}@${dom}:443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC${NC}"
+    echo ""
+    echo -e "  ${DIM}🔗 Link Trojan gRPC alt-TLS (port 8443):${NC}"
+    echo -e "  ${DIM}trojan://${p}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
     _tg_send "✅ <b>Trojan Baru — MAX</b>
 👤 <code>${u}</code>  🔑 <code>${p}</code>  📅 ${exp}"
@@ -2767,11 +2893,12 @@ WGP
     echo "${u}|${pubk}|${privk}|${ip}|${exp}|${ml}" >> "$WG_DB"
     set_maxlogin "$u" "$ml"
 
-    # Tulis client config
+    # Tulis client config (mengandung PrivateKey → chmod 600)
     mkdir -p "$WG_CLIENT_DIR"
+    chmod 700 "$WG_CLIENT_DIR"
     local cfile="$WG_CLIENT_DIR/${u}.conf"
     local srv; srv=$(get_domain)
-    cat > "$cfile" <<WGCLI
+    ( umask 077; cat > "$cfile" <<WGCLI
 [Interface]
 PrivateKey = ${privk}
 Address = ${ip}/24
@@ -2784,6 +2911,8 @@ Endpoint = ${srv}:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 WGCLI
+)
+    chmod 600 "$cfile"
 
     echo ""
     echo -e "  ${LG}✅ Peer WireGuard${NC}"
@@ -2961,21 +3090,32 @@ check_maxlogin_all() {
     # ── SSH connections (PAM-based) ────────────────────────────
     while IFS='|' read -r uname maxdev; do
         [[ -z "$uname" || -z "$maxdev" ]] && continue
-        # Hitung sesi sshd user ini
+        # Hitung sesi sshd user ini (cocokkan kolom cmd = "sshd:" diikuti "<user>@..." pada kolom berikutnya)
         local active
         active=$(ps -eo user,cmd --no-headers 2>/dev/null \
-                 | grep -c "sshd: ${uname}@" || echo 0)
+                 | awk -v u="$uname" '$2 == "sshd:" && $3 ~ ("^" u "@") {c++} END{print c+0}')
         if [[ "$active" -gt "$maxdev" ]]; then
-            # Kill PID berlebih
+            # FIX: ambil PID dari ps -eo pid,cmd \u2014 cmd-token pertama adalah $2 ("sshd:"),
+            # username pada token $3 dengan format <user>@<tty>.
             local pids
-            mapfile -t pids < <(ps -eo pid,user,cmd --no-headers 2>/dev/null \
-                | awk -v u="$uname" '$3 ~ "sshd:" && $3 ~ u"@" {print $1}')
+            mapfile -t pids < <(ps -eo pid,cmd --no-headers 2>/dev/null \
+                | awk -v u="$uname" '$2 == "sshd:" && $3 ~ ("^" u "@") {print $1}')
             local extra=$(( active - maxdev ))
-            local i=0
+            local i=0 pid
             for pid in "${pids[@]}"; do
                 [[ "$i" -ge "$extra" ]] && break
-                kill -9 "$pid" 2>/dev/null
-                i=$((i+1))
+                [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]] && continue
+                kill -9 "$pid" 2>/dev/null && i=$((i+1))
+            done
+            # Dropbear juga: pattern "dropbear" + user (best-effort, kalau pakai PAM)
+            local dpids
+            mapfile -t dpids < <(ps -eo pid,user,cmd --no-headers 2>/dev/null \
+                | awk -v u="$uname" '$3 ~ /dropbear/ && $2 == u {print $1}')
+            local j=0 dpid
+            for dpid in "${dpids[@]}"; do
+                [[ "$j" -ge "$extra" ]] && break
+                [[ -z "$dpid" || ! "$dpid" =~ ^[0-9]+$ ]] && continue
+                kill -9 "$dpid" 2>/dev/null && j=$((j+1))
             done
             _tg_send "🚫 <b>MaxLogin SSH</b>
 👤 <code>${uname}</code> melebihi ${maxdev} device — kick ${extra} sesi"
@@ -3158,8 +3298,8 @@ tool_ipv6() {
     echo -ne "  ${A1}›${NC} "; read -r ch
     case $ch in
         1)
-            sed -i '/disable_ipv6/d' /etc/sysctl.conf
-            cat >> /etc/sysctl.conf <<'V6'
+            # FIX: idempotent block dengan marker (re-run tidak duplikat)
+            _apply_block "IPV6-DISABLE" /etc/sysctl.conf <<'V6'
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
@@ -3168,6 +3308,8 @@ V6
             ok "IPv6 dinonaktifkan"
             ;;
         2)
+            # Hapus block disable (marker baru) + legacy line-by-line cleanup
+            sed -i '/^# >>> MAXPANEL-IPV6-DISABLE >>>$/,/^# <<< MAXPANEL-IPV6-DISABLE <<<$/d' /etc/sysctl.conf 2>/dev/null
             sed -i '/disable_ipv6/d' /etc/sysctl.conf
             sysctl -w net.ipv6.conf.all.disable_ipv6=0 &>/dev/null
             sysctl -w net.ipv6.conf.default.disable_ipv6=0 &>/dev/null
@@ -3276,7 +3418,7 @@ tool_restart_all() {
     local svcs=(ssh sshd dropbear stunnel4 xray trojan-go hysteria-server \
                 openvpn-server@tcp openvpn-server@udp wg-quick@wg0 nginx \
                 badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 \
-                ws-max-80 ws-max-8880 ws-max-2095 slowdns ohp)
+                ws-max-8880 slowdns ohp)
     for s in "${svcs[@]}"; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${s}\\.service"; then
             if systemctl restart "$s" 2>/dev/null; then
@@ -3295,7 +3437,7 @@ tool_check_service() {
     local svcs=(ssh dropbear stunnel4 xray trojan-go hysteria-server \
                 openvpn-server@tcp openvpn-server@udp wg-quick@wg0 nginx \
                 badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 \
-                ws-max-80 ws-max-8880 ws-max-2095 slowdns ohp cron)
+                ws-max-8880 slowdns ohp cron)
     printf "  ${BLD}${A3}%-28s %s${NC}\n" "SERVICE" "STATUS"
     _sep
     for s in "${svcs[@]}"; do
@@ -3545,10 +3687,15 @@ domain_issue_ssl() {
         "$ACME" --install-cert -d "$dom" \
             --fullchain-file /etc/xray/xray.crt \
             --key-file       /etc/xray/xray.key &>/dev/null
+        # FIX: lock down private key ke 600 (acme default 644 untuk fullchain)
+        chmod 644 /etc/xray/xray.crt
+        chmod 600 /etc/xray/xray.key
         cp -f /etc/xray/xray.crt /etc/hysteria/server.crt
         cp -f /etc/xray/xray.key /etc/hysteria/server.key
         cp -f /etc/xray/xray.crt /etc/trojan-go/server.crt
         cp -f /etc/xray/xray.key /etc/trojan-go/server.key
+        chmod 644 /etc/hysteria/server.crt /etc/trojan-go/server.crt
+        chmod 600 /etc/hysteria/server.key /etc/trojan-go/server.key
         ok "SSL Let's Encrypt terpasang untuk ${W}${dom}${NC}"
     else
         err "Gagal issue SSL — pastikan domain valid & port 80 bebas"
@@ -3780,7 +3927,7 @@ menu_xray() {
 menu_vmess() {
     while true; do
         show_header
-        _top; _btn "  ${IT}${AL}🟣  VMESS — port 80/443/8443${NC}"
+        _top; _btn "  ${IT}${AL}🟣  VMESS — path /vmess via Nginx 80/443${NC}"
         _sep; _btn "  ${A2}[1]${NC}  ➕  Buat Akun"
         _sep; _btn "  ${A2}[2]${NC}  🎁  Trial 1 jam"
         _sep; _btn "  ${A2}[3]${NC}  🗑   Hapus Akun"
@@ -3800,7 +3947,7 @@ menu_vmess() {
 menu_vless() {
     while true; do
         show_header
-        _top; _btn "  ${IT}${AL}🔵  VLESS — port 80/443/8443${NC}"
+        _top; _btn "  ${IT}${AL}🔵  VLESS — path /vless via Nginx 80/443 + gRPC${NC}"
         _sep; _btn "  ${A2}[1]${NC}  ➕  Buat Akun"
         _sep; _btn "  ${A2}[2]${NC}  🎁  Trial 1 jam"
         _sep; _btn "  ${A2}[3]${NC}  🗑   Hapus Akun"
@@ -3820,7 +3967,7 @@ menu_vless() {
 menu_trojan() {
     while true; do
         show_header
-        _top; _btn "  ${IT}${AL}🔴  TROJAN (Xray) — port 443/8443${NC}"
+        _top; _btn "  ${IT}${AL}🔴  TROJAN (Xray) — path /trojan-ws via Nginx 443 + gRPC${NC}"
         _sep; _btn "  ${A2}[1]${NC}  ➕  Buat Akun"
         _sep; _btn "  ${A2}[2]${NC}  🎁  Trial 1 jam"
         _sep; _btn "  ${A2}[3]${NC}  🗑   Hapus Akun"
@@ -4048,12 +4195,13 @@ menu_about() {
   Lisensi  : ${A3}Open / Free${NC}
 
   ${DIM}Protokol terinstall:${NC}
-   • OpenSSH (22, 80, 443)         • Dropbear (109, 143)
-   • Stunnel SSL (443, 445, 777)   • SSH WebSocket (80, 2096, 4443)
-   • OpenVPN (TCP 1194 / UDP 2200) • Xray (VMess/VLess/Trojan/SS)
-   • Trojan-Go (2087)              • Hysteria 2 (UDP 36712 + range)
-   • BadVPN UDPGW (7100/7200/7300) • WireGuard (UDP 51820)
-   • SlowDNS (53 → 5300)           • OHP (8080) opsional
+   • OpenSSH (22)                  • Dropbear (109, 143)
+   • Stunnel SSL (445, 777)        • Nginx (80 / 443 / 8443)
+   • SSH WebSocket via Nginx        • OpenVPN (TCP 1194 / UDP 2200)
+   • Xray VMess/VLess/Trojan/SS    • Trojan-Go (2087)
+   • Hysteria 2 (UDP 36712 + range) • BadVPN UDPGW (7100/7200/7300)
+   • WireGuard (UDP 51820)         • SlowDNS (53 → 5300)
+   • OHP (8080) opsional
 
   ${DIM}Path config:${NC}
    • /etc/maxpanel/        : panel data + user DB
@@ -4147,7 +4295,7 @@ do_uninstall() {
     inf "Menghentikan service..."
     for s in xray trojan-go hysteria-server wg-quick@wg0 stunnel4 dropbear \
              openvpn-server@tcp openvpn-server@udp slowdns ohp \
-             ws-max-80 ws-max-8880 ws-max-2095 \
+             ws-max-8880 \
              badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 nginx; do
         systemctl stop "$s" 2>/dev/null
         systemctl disable "$s" 2>/dev/null
