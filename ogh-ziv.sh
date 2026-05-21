@@ -140,7 +140,7 @@ THEMEF="$DIR/theme.conf"
 MLDB="$DIR/maxlogin.db"   # format: username|maxdevice
 BINARY_URL="https://github.com/fauzanihanipah/ziv-udp/releases/download/udp-zivpn/udp-zivpn-linux-amd64"
 CONFIG_URL="https://raw.githubusercontent.com/fauzanihanipah/ziv-udp/main/config.json"
-SCRIPT_VERSION="1.12"
+SCRIPT_VERSION="1.13"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/ogh-ziv.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version.txt"
 
@@ -382,8 +382,8 @@ draw_logo() {
     echo -e "  ${L5}${BLD}  ╚██████╔╝╚██████╔╝██║  ██║    ███████╗██║ ╚████╔╝   ${NC}"
     echo -e "  ${DIM}   ╚═════╝  ╚═════╝ ╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═══╝   ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
-    echo -e "  ${A4}      ✦  * SECURE VPN MANAGEMENT SYSTEM *  ✦      ${NC}"
-    echo -e "  ${DIM}  +---------------- ${A2}[ PREMIUM ]${DIM} ----------------+  ${NC}"
+    echo -e "  ${A4}          ✦  * SECURE VPN MANAGEMENT SYSTEM *  ✦      ${NC}"
+    echo -e "  ${DIM}      +---------------- ${A2}[ PREMIUM ]${DIM} ----------------+  ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
 }
 
@@ -2682,14 +2682,14 @@ main_menu() {
 
         # ── Judul ─────────────────────────────────────────────────────────
         echo -e "  ${A1}${_DASH}${NC}"
-        echo -e "  ${A1}+------------- ${BLD}${AL}OGH-ZIV PREMIUM PANEL${NC} ${A1}-------------+${NC}"
+        echo -e "  ${A1}      +------------- ${BLD}${AL}OGH-ZIV PREMIUM PANEL${NC} ${A1}-------------+${NC}"
         echo -e "  ${A1}${_DASH}${NC}"
         echo ""
 
         # ── 2-Column Grid ─────────────────────────────────────────────────────────
         _r2 "${A2}" "[1]  👤  Kelola Akun"      "${A2}" "[2]  ⚙   Service"
         echo -e "  ${A1}${_DASH}${NC}"
-        _r2 "${A2}" "[3]  🤖  Telegram Bot"     "${A2}" "[4]  🛒  Menu Jualan"
+        _r2 "${A2}" "[3]   🤖  Telegram Bot"    "${A2}" "[4]  🛒  Menu Jualan"
         echo -e "  ${A1}${_DASH}${NC}"
         _r2 "${A2}" "[5]  📊  Bandwidth"        "${A2}" "[6]  🔄  Restart"
         echo -e "  ${A1}${_DASH}${NC}"
@@ -2697,9 +2697,9 @@ main_menu() {
         echo -e "  ${A1}${_DASH}${NC}"
         _r2 "${A2}" "[9]  🎨  Tema"                 "${A2}" "[U]  🔄  Cek Update"
         echo -e "  ${A1}${_DASH}${NC}"
-        _r2 "${LR}" "[E]  🗑   Uninstall"        "${A4}" "[0]  ✗   Keluar"
+        _r2 "${LR}" "[E]  🗑  Uninstall"        "${A4}" "[0]  ✗   Keluar"
         echo -e "  ${A1}${_DASH}${NC}"
-        echo -e "  ${DIM}              ✦  OGH-ZIV v${SCRIPT_VERSION}  ✦              ${NC}"
+        echo -e "  ${DIM}                 ✦  OGH-ZIV v${SCRIPT_VERSION}  ✦              ${NC}"
 
         echo ""
         echo -ne "  ${A1}›${NC} Pilih menu: "; read -r ch
