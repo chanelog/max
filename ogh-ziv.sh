@@ -140,7 +140,7 @@ THEMEF="$DIR/theme.conf"
 MLDB="$DIR/maxlogin.db"   # format: username|maxdevice
 BINARY_URL="https://github.com/fauzanihanipah/ziv-udp/releases/download/udp-zivpn/udp-zivpn-linux-amd64"
 CONFIG_URL="https://raw.githubusercontent.com/fauzanihanipah/ziv-udp/main/config.json"
-SCRIPT_VERSION="1.13"
+SCRIPT_VERSION="1.14"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/ogh-ziv.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version.txt"
 
@@ -382,8 +382,8 @@ draw_logo() {
     echo -e "  ${L5}${BLD}  ╚██████╔╝╚██████╔╝██║  ██║    ███████╗██║ ╚████╔╝   ${NC}"
     echo -e "  ${DIM}   ╚═════╝  ╚═════╝ ╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═══╝   ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
-    echo -e "  ${A4}          ✦  * SECURE VPN MANAGEMENT SYSTEM *  ✦      ${NC}"
-    echo -e "  ${DIM}      +---------------- ${A2}[ PREMIUM ]${DIM} ----------------+  ${NC}"
+    echo -e "  ${A4}         ✦  * SECURE VPN MANAGEMENT SYSTEM *  ✦      ${NC}"
+    echo -e "  ${DIM}     +---------------- ${A2}[ PREMIUM ]${DIM} ----------------+  ${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
 }
 
@@ -446,7 +446,7 @@ draw_vps() {
     local domain_short; domain_short=$(echo "$domain" | cut -c1-14)
 
     # Row 1: HOST | OS
-    _btn "  ${DIM}HOST    ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$hn")${NC}  ${DIM}OS    ${NC}${A1}│${NC} ${W}${os_short}${NC}"
+    _btn "  ${DIM}HOST    ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$hn")${NC} ${DIM}OS  ${NC}${A1}│${NC} ${W}${os_short}${NC}"
 
     echo -e "  ${A1}${_DASH}${NC}"
 
@@ -2682,7 +2682,7 @@ main_menu() {
 
         # ── Judul ─────────────────────────────────────────────────────────
         echo -e "  ${A1}${_DASH}${NC}"
-        echo -e "  ${A1}      +------------- ${BLD}${AL}OGH-ZIV PREMIUM PANEL${NC} ${A1}-------------+${NC}"
+        echo -e "  ${A1}   +------------- ${BLD}${AL}OGH-ZIV PREMIUM PANEL${NC} ${A1}-------------+${NC}"
         echo -e "  ${A1}${_DASH}${NC}"
         echo ""
 
