@@ -453,7 +453,7 @@ draw_vps() {
     os_short=$(echo "$os" | cut -c1-14)
     domain_short=$(echo "$domain" | cut -c1-18)
 
-    _btn "  ${DIM}HOST    ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$hn")${NC}  ${DIM}OS      ${NC}${A1}│${NC} ${W}${os_short}${NC}"
+    _btn "  ${DIM}HOST    ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$hn")${NC}  ${DIM}OS    ${NC}${A1}│${NC} ${W}${os_short}${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
     _btn "  ${DIM}IP ADDR ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$ip")${NC}  ${DIM}DOMAIN  ${NC}${A1}│${NC} ${W}${domain_short}${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
