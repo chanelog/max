@@ -140,7 +140,7 @@ THEMEF="$DIR/theme.conf"
 MLDB="$DIR/maxlogin.db"   # format: username|maxdevice
 BINARY_URL="https://github.com/fauzanihanipah/ziv-udp/releases/download/udp-zivpn/udp-zivpn-linux-amd64"
 CONFIG_URL="https://raw.githubusercontent.com/fauzanihanipah/ziv-udp/main/config.json"
-SCRIPT_VERSION="1.14"
+SCRIPT_VERSION="1.15"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/ogh-ziv.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version.txt"
 
@@ -451,12 +451,12 @@ draw_vps() {
     echo -e "  ${A1}${_DASH}${NC}"
 
     # Row 2: IP | DOMAIN
-    _btn "  ${DIM}IP ADDR ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$ip")${NC}  ${DIM}DOMAIN  ${NC}${A1}│${NC} ${W}${domain_short}${NC}"
+    _btn "  ${DIM}IP ADDR ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$ip")${NC}    ${DIM}DOMAIN  ${NC}${A1}│${NC} ${W}${domain_short}${NC}"
 
     echo -e "  ${A1}${_DASH}${NC}"
 
     # Row 3: PORT | BRAND
-    _btn "  ${DIM}PORT    ${NC}${A1}│${NC} ${Y}$(printf '%-16s' "$port")${NC}  ${DIM}BRAND   ${NC}${A1}│${NC} ${A4}${brand}${NC}"
+    _btn "  ${DIM}PORT    ${NC}${A1}│${NC} ${Y}$(printf '%-16s' "$port")${NC}    ${DIM}BRAND   ${NC}${A1}│${NC} ${A4}${brand}${NC}"
 
     echo -e "  ${A1}${_DASH}${NC}"
 
