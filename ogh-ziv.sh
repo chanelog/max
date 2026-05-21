@@ -446,7 +446,7 @@ draw_vps() {
     local domain_short; domain_short=$(echo "$domain" | cut -c1-14)
 
     # Row 1: HOST | OS
-    _btn "  ${DIM}HOST    ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$hn")${NC}  ${DIM}OS      ${NC}${A1}│${NC} ${W}${os_short}${NC}"
+    _btn "  ${DIM}HOST    ${NC}${A1}│${NC} ${A3}$(printf '%-16s' "$hn")${NC}  ${DIM}OS    ${NC}${A1}│${NC} ${W}${os_short}${NC}"
 
     echo -e "  ${A1}${_DASH}${NC}"
 
