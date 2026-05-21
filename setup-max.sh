@@ -124,7 +124,7 @@ OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
 
 SCRIPT_VERSION="1.0"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
-VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version.txt"
+VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
 # ════════════════════════════════════════════════════════════
 #  TEMA — 15 PREMIUM (struktur identik dengan ogh-ziv)
