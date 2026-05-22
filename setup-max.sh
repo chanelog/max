@@ -122,7 +122,7 @@ UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
 SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
 OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
 
-SCRIPT_VERSION="1.7"
+SCRIPT_VERSION="1.8"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
@@ -369,15 +369,311 @@ del_maxlogin() {
 
 # ════════════════════════════════════════════════════════════
 #  TELEGRAM HELPER
+# ────────────────────────────────────────────────────────────
+#  _tg_send       <text>            → kirim text HTML (lama, kompatibel)
+#  _tg_send_html  <text>            → alias _tg_send
+#  _tg_send_doc   <file> [caption]  → kirim file (sendDocument)
+#  _tg_get_latest_doc <pattern>     → ambil file terbaru dari getUpdates
 # ════════════════════════════════════════════════════════════
-_tg_send() {
-    [[ ! -f "$BOTF" ]] && return
+_tg_load_creds() {
+    [[ ! -f "$BOTF" ]] && return 1
     # shellcheck disable=SC1090
     source "$BOTF" 2>/dev/null
+    [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]]
+}
+
+_tg_send() {
+    _tg_load_creds || return
     local msg="$1"
-    [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]] && \
-        curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" -d "text=${msg}" -d "parse_mode=HTML" &>/dev/null
+    curl -s --max-time 15 -X POST \
+        "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        -d "chat_id=${CHAT_ID}" \
+        --data-urlencode "text=${msg}" \
+        -d "parse_mode=HTML" \
+        -d "disable_web_page_preview=true" &>/dev/null
+}
+
+_tg_send_html() { _tg_send "$@"; }
+
+# Kirim file (sendDocument). Return 0 bila sukses.
+_tg_send_doc() {
+    _tg_load_creds || return 1
+    local file="$1" caption="${2:-}"
+    [[ ! -f "$file" ]] && return 1
+    local args=(-F "chat_id=${CHAT_ID}" -F "document=@${file}" -F "parse_mode=HTML")
+    [[ -n "$caption" ]] && args+=(-F "caption=${caption}")
+    curl -s --max-time 120 \
+        "${args[@]}" \
+        "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" &>/dev/null
+}
+
+# Ambil file_id document terbaru dari chat (cocokkan nama file dengan pattern)
+# Echo: <file_id>|<file_name>  bila ada, kosong bila tidak.
+_tg_find_latest_doc() {
+    _tg_load_creds || return 1
+    local pattern="${1:-max-backup-.*\\.tar\\.gz}"
+    local resp
+    resp=$(curl -s --max-time 20 \
+        "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=100&offset=-100" 2>/dev/null)
+    [[ -z "$resp" ]] && return 1
+    # Ekstrak document terbaru yang match pattern (chat_id kita) — urutan terakhir = terbaru
+    python3 - "$resp" "$pattern" "$CHAT_ID" <<'PYTG' 2>/dev/null
+import json, re, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(0)
+pat   = re.compile(sys.argv[2])
+cid   = str(sys.argv[3])
+found = None
+for upd in data.get("result", []):
+    msg = upd.get("message") or upd.get("channel_post") or {}
+    chat = str((msg.get("chat") or {}).get("id", ""))
+    if chat != cid:
+        continue
+    doc = msg.get("document")
+    if not doc:
+        continue
+    name = doc.get("file_name", "")
+    if pat.search(name):
+        found = (doc.get("file_id"), name)
+if found:
+    print(f"{found[0]}|{found[1]}")
+PYTG
+}
+
+# Download file dari telegram berdasarkan file_id ke path tujuan.
+_tg_download_doc() {
+    _tg_load_creds || return 1
+    local file_id="$1" out="$2"
+    [[ -z "$file_id" || -z "$out" ]] && return 1
+    local fp_resp file_path
+    fp_resp=$(curl -s --max-time 20 \
+        "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${file_id}" 2>/dev/null)
+    file_path=$(echo "$fp_resp" | python3 -c \
+        'import json,sys;print(json.load(sys.stdin).get("result",{}).get("file_path",""))' 2>/dev/null)
+    [[ -z "$file_path" ]] && return 1
+    curl -s --max-time 300 -o "$out" \
+        "https://api.telegram.org/file/bot${BOT_TOKEN}/${file_path}"
+    [[ -s "$out" ]]
+}
+
+# ════════════════════════════════════════════════════════════
+#  TELEGRAM ACCOUNT NOTIFIER — Format identik panel
+# ════════════════════════════════════════════════════════════
+_tg_brand() {
+    local b="MAX PANEL"
+    if [[ -f "$STRF" ]]; then
+        # shellcheck disable=SC1090
+        source "$STRF" 2>/dev/null
+        b="${BRAND:-MAX PANEL}"
+    fi
+    echo "$b"
+}
+
+# SSH / OpenSSH / Dropbear / SSH-WS / Stunnel  — full detail seperti show_box_ssh
+_tg_send_account_ssh() {
+    local u="$1" p="$2" exp="$3" ml="${4:-2}"
+    [[ -f "$BOTF" ]] || return
+    local ip dom brand
+    ip=$(get_ip); dom=$(get_domain); brand=$(_tg_brand)
+    _tg_send "✅ <b>Akun SSH/OpenSSH — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 <b>Username</b>  : <code>${u}</code>
+🔑 <b>Password</b>  : <code>${p}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🖥 <b>IP Publik</b>  : <code>${ip}</code>
+🌐 <b>Host</b>      : <code>${dom}</code>
+🔌 <b>Port SSH</b>   : <code>22</code>
+🔌 <b>Dropbear</b>   : <code>109, 143</code>
+🔒 <b>SSL/Stunnel</b>: <code>445, 777</code>
+🔌 <b>WS HTTP</b>    : <code>80 (/ws-ssh)</code>
+🔒 <b>WS HTTPS</b>   : <code>443 (/ws-ssh)</code>
+📡 <b>OpenVPN</b>    : <code>TCP 1194 / UDP 2200</code>
+📡 <b>UDPGW</b>      : <code>7100, 7200, 7300</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 <b>MaxLogin</b>   : <code>${ml} device</code>
+📅 <b>Expired</b>    : <code>${exp}</code>"
+}
+
+# Xray (VMess / VLess / Trojan / Shadowsocks)
+_tg_send_account_xray() {
+    local proto="$1" u="$2" key="$3" exp="$4" ml="${5:-2}"
+    [[ -f "$BOTF" ]] || return
+    local ip dom brand keylabel ports paths links=""
+    ip=$(get_ip); dom=$(get_domain); brand=$(_tg_brand)
+
+    case "$proto" in
+        VMess)
+            keylabel="UUID"
+            ports="🔌 <b>Port TLS</b>  : <code>443 (WS)</code>
+🔌 <b>Port HTTP</b> : <code>80 (WS)</code>"
+            paths="🛣 <b>Path</b>      : <code>/vmess</code>"
+            local vt vn
+            vt=$(printf '%s' "{\"v\":\"2\",\"ps\":\"${u}-TLS\",\"add\":\"${dom}\",\"port\":\"443\",\"id\":\"${key}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${dom}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${dom}\"}" | base64 -w0)
+            vn=$(printf '%s' "{\"v\":\"2\",\"ps\":\"${u}-HTTP\",\"add\":\"${dom}\",\"port\":\"80\",\"id\":\"${key}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${dom}\",\"path\":\"/vmess\",\"tls\":\"none\"}" | base64 -w0)
+            links="🔗 <b>VMess TLS</b>:
+<code>vmess://${vt}</code>
+
+🔗 <b>VMess HTTP</b>:
+<code>vmess://${vn}</code>"
+            ;;
+        VLess)
+            keylabel="UUID"
+            ports="🔌 <b>Port TLS</b>  : <code>443 (WS)</code>
+🔌 <b>Port HTTP</b> : <code>80 (WS)</code>
+🔌 <b>gRPC TLS</b>  : <code>8443</code>"
+            paths="🛣 <b>WS Path</b>   : <code>/vless</code>
+🛣 <b>gRPC SVC</b>  : <code>vless-grpc</code>"
+            links="🔗 <b>VLess WS TLS</b>:
+<code>vless://${key}@${dom}:443?path=/vless&security=tls&encryption=none&host=${dom}&type=ws&sni=${dom}#${u}-TLS</code>
+
+🔗 <b>VLess WS HTTP</b>:
+<code>vless://${key}@${dom}:80?path=/vless&encryption=none&host=${dom}&type=ws#${u}-HTTP</code>
+
+🔗 <b>VLess gRPC TLS</b>:
+<code>vless://${key}@${dom}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC</code>"
+            ;;
+        Trojan)
+            keylabel="Password"
+            ports="🔌 <b>Port TLS</b>  : <code>443 (WS)</code>
+🔌 <b>gRPC TLS</b>  : <code>8443</code>"
+            paths="🛣 <b>WS Path</b>   : <code>/trojan-ws</code>
+🛣 <b>gRPC SVC</b>  : <code>trojan-grpc</code>"
+            links="🔗 <b>Trojan WS TLS</b>:
+<code>trojan://${key}@${dom}:443?path=/trojan-ws&security=tls&host=${dom}&type=ws&sni=${dom}#${u}-WS</code>
+
+🔗 <b>Trojan gRPC TLS</b>:
+<code>trojan://${key}@${dom}:443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC</code>"
+            ;;
+        Shadowsocks)
+            keylabel="Password"
+            ports="🔌 <b>Port</b>      : <code>8388</code>
+🧪 <b>Method</b>    : <code>aes-128-gcm</code>"
+            paths=""
+            local sslink
+            sslink=$(printf '%s' "aes-128-gcm:${key}@${dom}:8388" | base64 -w0)
+            links="🔗 <b>Shadowsocks</b>:
+<code>ss://${sslink}#${u}</code>"
+            ;;
+        *)
+            keylabel="Key"; ports=""; paths=""; links=""
+            ;;
+    esac
+
+    _tg_send "✅ <b>Akun ${proto} — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 <b>Remark</b>    : <code>${u}</code>
+🔑 <b>${keylabel}</b>      : <code>${key}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🌐 <b>Host</b>      : <code>${dom}</code>
+🖥 <b>IP</b>        : <code>${ip}</code>
+${ports}
+${paths}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 <b>MaxLogin</b>  : <code>${ml} device</code>
+📅 <b>Expired</b>   : <code>${exp}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${links}"
+}
+
+# Trojan-Go
+_tg_send_account_tgo() {
+    local u="$1" p="$2" exp="$3" ml="${4:-2}"
+    [[ -f "$BOTF" ]] || return
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    _tg_send "✅ <b>Akun Trojan-Go — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 <b>Username</b>  : <code>${u}</code>
+🔑 <b>Password</b>  : <code>${p}</code>
+🌐 <b>Host</b>      : <code>${dom}</code>
+🔌 <b>Port</b>      : <code>2087</code>
+🛣 <b>Path</b>      : <code>/trojan-go</code>
+🔒 <b>MaxLogin</b>  : <code>${ml} device</code>
+📅 <b>Expired</b>   : <code>${exp}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>Link</b>:
+<code>trojan-go://${p}@${dom}:2087?sni=${dom}&type=ws&path=%2Ftrojan-go#${u}</code>"
+}
+
+# Hysteria 2
+_tg_send_account_hy() {
+    local u="$1" p="$2" exp="$3" ml="${4:-2}"
+    [[ -f "$BOTF" ]] || return
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    _tg_send "✅ <b>Akun Hysteria 2 — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 <b>Username</b>  : <code>${u}</code>
+🔑 <b>Password</b>  : <code>${p}</code>
+🌐 <b>Host</b>      : <code>${dom}</code>
+🔌 <b>Port</b>      : <code>36712 (UDP)</code>
+🔒 <b>MaxLogin</b>  : <code>${ml} device</code>
+📅 <b>Expired</b>   : <code>${exp}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>Link</b>:
+<code>hy2://${u}:${p}@${dom}:36712?insecure=1&sni=${dom}#${u}</code>"
+}
+
+# SlowDNS
+_tg_send_account_slowdns() {
+    local u="$1" p="$2" exp="$3" ml="${4:-2}"
+    [[ -f "$BOTF" ]] || return
+    local dom brand pub
+    dom=$(get_domain); brand=$(_tg_brand)
+    pub=$(cat "$SLOW_DIR/server.pub" 2>/dev/null || echo "-")
+    _tg_send "✅ <b>Akun SlowDNS — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 <b>Username</b>  : <code>${u}</code>
+🔑 <b>Password</b>  : <code>${p}</code>
+🌐 <b>NS Domain</b> : <code>${dom}</code>
+🔌 <b>Port</b>      : <code>53 (UDP), 5300</code>
+🔑 <b>PubKey</b>    : <code>${pub}</code>
+🔒 <b>MaxLogin</b>  : <code>${ml} device</code>
+📅 <b>Expired</b>   : <code>${exp}</code>"
+}
+
+# WireGuard — kirim caption + file .conf (+ QR PNG bila qrencode tersedia)
+_tg_send_account_wg() {
+    local u="$1" ip="$2" exp="$3" cfile="$4"
+    [[ -f "$BOTF" ]] || return
+    local srv brand; srv=$(get_domain); brand=$(_tg_brand)
+    local caption="✅ <b>Peer WireGuard — ${brand}</b>
+👤 <b>Name</b>     : <code>${u}</code>
+📡 <b>IP Peer</b>  : <code>${ip}</code>
+🔌 <b>Endpoint</b> : <code>${srv}:51820</code>
+📅 <b>Expired</b>  : <code>${exp}</code>"
+    [[ -f "$cfile" ]] && _tg_send_doc "$cfile" "$caption" || _tg_send "$caption"
+    # Kirim QR PNG opsional
+    if command -v qrencode &>/dev/null && [[ -f "$cfile" ]]; then
+        local qr="/tmp/wg-${u}-$(date +%s).png"
+        qrencode -o "$qr" -s 6 < "$cfile" 2>/dev/null
+        [[ -s "$qr" ]] && _tg_send_doc "$qr" "🔳 QR Code WireGuard <code>${u}</code>"
+        rm -f "$qr" 2>/dev/null
+    fi
+}
+
+# OpenVPN — kirim caption + 2 file .ovpn (TCP & UDP)
+_tg_send_account_ovpn() {
+    local u="$1" p="$2" exp="$3" ml="${4:-2}"
+    [[ -f "$BOTF" ]] || return
+    local ip brand; ip=$(get_ip); brand=$(_tg_brand)
+    local caption="✅ <b>Akun OpenVPN — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 <b>Username</b>  : <code>${u}</code>
+🔑 <b>Password</b>  : <code>${p}</code>
+🖥 <b>Server</b>    : <code>${ip}</code>
+🔌 <b>TCP</b>       : <code>1194</code>
+🔌 <b>UDP</b>       : <code>2200</code>
+🔒 <b>MaxLogin</b>  : <code>${ml} device</code>
+📅 <b>Expired</b>   : <code>${exp}</code>"
+    local ftcp="/etc/openvpn/client/${u}/${u}-tcp.ovpn"
+    local fudp="/etc/openvpn/client/${u}/${u}-udp.ovpn"
+    if [[ -f "$ftcp" ]]; then
+        _tg_send_doc "$ftcp" "$caption"
+    else
+        _tg_send "$caption"
+    fi
+    [[ -f "$fudp" ]] && _tg_send_doc "$fudp" "📄 Config UDP — <code>${u}</code>"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1853,11 +2149,7 @@ ssh_add() {
 
     show_box_ssh "$u" "$p" "$exp" "$ml"
 
-    _tg_send "✅ <b>Akun SSH Baru — MAX</b>
-👤 User: <code>${u}</code>
-🔑 Pass: <code>${p}</code>
-📅 Exp : ${exp}
-🔒 ML  : ${ml}"
+    _tg_send_account_ssh "$u" "$p" "$exp" "$ml"
 
     pause
 }
@@ -1873,7 +2165,9 @@ ssh_trial() {
     echo -e "${p}\n${p}" | passwd "$u" &>/dev/null
     chage -E "$(date -d '+1 day' +%Y-%m-%d)" "$u" 2>/dev/null
 
-    echo "${u}|${p}|TRIAL-$(date +%s)|1" >> "$SSH_DB"
+    # FIX: skema 4-field konsisten dengan ssh_add (u|p|exp|ml)
+    # exp = hari ini (auto-cleanup oleh cron + chage), tapi auto-delete 1 jam tetap dijadwalkan
+    echo "${u}|${p}|${exp}|1" >> "$SSH_DB"
     set_maxlogin "$u" "1"
 
     # Schedule auto-delete 1 jam (atrun atau cron)
@@ -1889,6 +2183,8 @@ ssh_trial() {
     fi
 
     show_box_ssh "$u" "$p" "Trial 1 jam" "1"
+
+    _tg_send_account_ssh "$u" "$p" "Trial 1 jam" "1"
     pause
 }
 
@@ -2120,10 +2416,7 @@ vmess_add() {
     echo -e "  ${LG}vmess://${vmess_ntls}${NC}"
     echo ""
 
-    _tg_send "✅ <b>VMess Baru — MAX</b>
-👤 <code>${u}</code>
-🔑 <code>${uuid}</code>
-📅 ${exp} | 🔒 ${ml} dev"
+    _tg_send_account_xray "VMess" "$u" "$uuid" "$exp" "$ml"
 
     pause
 }
@@ -2134,11 +2427,13 @@ vmess_trial() {
     local u="trial-vmess-$(date +%s | tail -c 5)"
     local uuid; uuid=$(rand_uuid)
     local exp; exp=$(mk_exp 1)
-    echo "${u}|${uuid}|TRIAL|${exp}|1" >> "$VMESS_DB"
+    # FIX: skema 4-field konsisten (u|uuid|exp|ml) — sebelumnya 5 field
+    echo "${u}|${uuid}|${exp}|1" >> "$VMESS_DB"
     set_maxlogin "$u" "1"
     _xray_sync_clients
 
     show_box_xray "VMess" "$u" "$uuid" "Trial 1 jam" "1"
+    _tg_send_account_xray "VMess" "$u" "$uuid" "Trial 1 jam" "1"
 
     # Auto-delete 1 jam
     local cron_id="trial-vmess-$(date +%s)"
@@ -2222,8 +2517,7 @@ vless_add() {
     echo -e "  ${DIM}🔗 Link VLess gRPC alt-TLS (port 8443):${NC}"
     echo -e "  ${DIM}vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
-    _tg_send "✅ <b>VLess Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${uuid}</code>  📅 ${exp}"
+    _tg_send_account_xray "VLess" "$u" "$uuid" "$exp" "$ml"
     pause
 }
 
@@ -2236,6 +2530,7 @@ vless_trial() {
     set_maxlogin "$u" "1"
     _xray_sync_clients
     show_box_xray "VLess" "$u" "$uuid" "Trial 1 jam" "1"
+    _tg_send_account_xray "VLess" "$u" "$uuid" "Trial 1 jam" "1"
     local cron_id="trial-vless-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${VLESS_DB}; /usr/local/bin/max-menu --sync-xray; rm -f /etc/cron.d/${cron_id}" \
@@ -2307,8 +2602,7 @@ trojan_add() {
     echo -e "  ${DIM}🔗 Link Trojan gRPC alt-TLS (port 8443):${NC}"
     echo -e "  ${DIM}trojan://${p}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
-    _tg_send "✅ <b>Trojan Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>  📅 ${exp}"
+    _tg_send_account_xray "Trojan" "$u" "$p" "$exp" "$ml"
     pause
 }
 
@@ -2320,6 +2614,7 @@ trojan_trial() {
     echo "${u}|${p}|$(mk_exp 1)|1" >> "$TROJAN_DB"
     set_maxlogin "$u" "1"; _xray_sync_clients
     show_box_xray "Trojan" "$u" "$p" "Trial 1 jam" "1"
+    _tg_send_account_xray "Trojan" "$u" "$p" "Trial 1 jam" "1"
     local cron_id="trial-trojan-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${TROJAN_DB}; /usr/local/bin/max-menu --sync-xray; rm -f /etc/cron.d/${cron_id}" \
@@ -2454,6 +2749,7 @@ ss_add() {
     echo -e "  ${DIM}🔗 Link SS :${NC}"
     echo -e "  ${LG}ss://${link}#${u}${NC}"
     echo ""
+    _tg_send_account_xray "Shadowsocks" "$u" "$p" "$exp" "$ml"
     pause
 }
 
@@ -2533,8 +2829,7 @@ tgo_add() {
     echo -e "  ${DIM}🔗 Link Trojan-Go:${NC}"
     echo -e "  ${LG}trojan-go://${p}@${dom}:2087?sni=${dom}&type=ws&path=%2Ftrojan-go#${u}${NC}"
     echo ""
-    _tg_send "✅ <b>Trojan-Go Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send_account_tgo "$u" "$p" "$exp" "$ml"
     pause
 }
 
@@ -2545,6 +2840,7 @@ tgo_trial() {
     echo "${u}|${p}|$(mk_exp 1)|1" >> "$TROJANGO_DB"
     set_maxlogin "$u" "1"; _trojango_sync
     ok "Trial Trojan-Go: ${W}${u}${NC} / ${A3}${p}${NC}"
+    _tg_send_account_tgo "$u" "$p" "Trial 1 jam" "1"
     local cron_id="trial-tgo-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${TROJANGO_DB}; systemctl restart trojan-go; rm -f /etc/cron.d/${cron_id}" \
@@ -2663,8 +2959,7 @@ hy_add() {
     echo -e "  ${DIM}🔗 Link Hysteria 2:${NC}"
     echo -e "  ${LG}hy2://${u}:${p}@${dom}:36712?insecure=1&sni=${dom}#${u}${NC}"
     echo ""
-    _tg_send "✅ <b>Hysteria Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send_account_hy "$u" "$p" "$exp" "$ml"
     pause
 }
 
@@ -2675,6 +2970,7 @@ hy_trial() {
     echo "${u}|${p}|$(mk_exp 1)|1" >> "$HY_DB"
     set_maxlogin "$u" "1"; _hy_sync
     ok "Trial: ${W}${u}${NC} / ${A3}${p}${NC}"
+    _tg_send_account_hy "$u" "$p" "Trial 1 jam" "1"
     local cron_id="trial-hy-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${HY_DB}; systemctl restart hysteria-server; rm -f /etc/cron.d/${cron_id}" \
@@ -2759,8 +3055,7 @@ ovpn_add() {
     printf  "  ${A1}│${NC} 📄 ${DIM}Config UDP${NC}: ${W}/etc/openvpn/client/%s/%s-udp.ovpn${NC}\n" "$u" "$u"
     echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
     echo ""
-    _tg_send "✅ <b>OpenVPN Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send_account_ovpn "$u" "$p" "$exp" "$ml"
     pause
 }
 
@@ -2799,10 +3094,18 @@ ovpn_trial() {
     local u="trial-ovpn-$(date +%s | tail -c 5)" p; p=$(rand_pass)
     useradd -s /bin/false -M "$u" 2>/dev/null
     echo -e "${p}\n${p}" | passwd "$u" &>/dev/null
-    chage -E "$(date -d '+1 day' +%Y-%m-%d)" "$u" 2>/dev/null
-    echo "${u}|${p}|TRIAL|1" >> "$OVPN_DB"
+    local exp; exp=$(mk_exp 1)
+    chage -E "$exp" "$u" 2>/dev/null
+    # FIX: skema 4-field konsisten (u|p|exp|ml)
+    echo "${u}|${p}|${exp}|1" >> "$OVPN_DB"
     set_maxlogin "$u" "1"
     ok "Trial OpenVPN: ${W}${u}${NC} / ${A3}${p}${NC}"
+    # Generate .ovpn client config + kirim ke TG
+    mkdir -p "/etc/openvpn/client/${u}"
+    local ip; ip=$(get_ip)
+    _make_ovpn_client "$u" "$ip" "1194" "tcp" > "/etc/openvpn/client/${u}/${u}-tcp.ovpn"
+    _make_ovpn_client "$u" "$ip" "2200" "udp" > "/etc/openvpn/client/${u}/${u}-udp.ovpn"
+    _tg_send_account_ovpn "$u" "$p" "Trial 1 jam" "1"
     local cron_id="trial-ovpn-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root userdel -r ${u}; sed -i '/^${u}|/d' ${OVPN_DB}; rm -f /etc/cron.d/${cron_id}" \
@@ -2949,8 +3252,7 @@ WGCLI
         qrencode -t ANSIUTF8 < "$cfile"
         echo ""
     fi
-    _tg_send "✅ <b>WireGuard Peer — MAX</b>
-👤 <code>${u}</code>  📡 <code>${ip}</code>"
+    _tg_send_account_wg "$u" "$ip" "$exp" "$cfile"
     pause
 }
 
@@ -3059,6 +3361,7 @@ slow_add() {
     printf  "  ${A1}│${NC} 📅 ${DIM}Expired ${NC} : ${Y}%s${NC}\n" "$exp"
     echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
     echo ""
+    _tg_send_account_slowdns "$u" "$p" "$exp" "$ml"
     pause
 }
 
@@ -3566,9 +3869,24 @@ do_backup() {
         local sz; sz=$(du -sh "$out" | cut -f1)
         ok "Backup: ${W}$(basename "$out")${NC} (${Y}${sz}${NC})"
         ok "Path : ${A3}${out}${NC}"
-        _tg_send "💾 <b>Backup Berhasil — MAX</b>
+        # Kirim file backup ke Telegram (sendDocument)
+        if [[ -f "$BOTF" ]]; then
+            inf "Mengirim file backup ke Telegram..."
+            local caption="💾 <b>Backup MAX PANEL</b>
 📁 <code>$(basename "$out")</code>
-📦 Size: ${sz}"
+📦 Size: <code>${sz}</code>
+🕒 $(TZ='Asia/Jakarta' date '+%d/%m/%Y %H:%M:%S')
+🖥 Host: <code>$(hostname)</code>"
+            if _tg_send_doc "$out" "$caption"; then
+                ok "Backup terkirim ke Telegram"
+            else
+                warn "Gagal kirim ke Telegram (file mungkin > 50MB)"
+                _tg_send "💾 <b>Backup Selesai (lokal saja)</b>
+📁 <code>$(basename "$out")</code>
+📦 Size: ${sz}
+⚠️ File terlalu besar untuk dikirim via bot."
+            fi
+        fi
     else
         err "Backup gagal!"
     fi
@@ -3578,6 +3896,19 @@ do_backup() {
 do_restore() {
     show_header
     _top; _btn "  ${IT}${AL}♻️   RESTORE BACKUP${NC}"; _bot; echo ""
+    echo -e "  ${A2}[1]${NC} Restore dari ${W}folder lokal${NC} (${A3}${BACKUPDIR}${NC})"
+    echo -e "  ${A2}[2]${NC} Restore dari ${W}Telegram${NC} (auto-fetch backup terbaru)"
+    echo -e "  ${A2}[0]${NC} Batal"
+    echo ""
+    echo -ne "  ${A3}Pilih sumber${NC}: "; read -r src
+    case "$src" in
+        1) _do_restore_local ;;
+        2) _do_restore_telegram ;;
+        *) inf "Dibatalkan."; pause; return ;;
+    esac
+}
+
+_do_restore_local() {
     if [[ ! -d "$BACKUPDIR" ]] || [[ -z "$(ls -A "$BACKUPDIR" 2>/dev/null)" ]]; then
         warn "Belum ada file backup di $BACKUPDIR"
         pause; return
@@ -3602,6 +3933,54 @@ do_restore() {
     tar -xzPf "$f" -C / && ok "Restore selesai" || err "Restore gagal!"
     systemctl daemon-reload
     tool_restart_all >/dev/null 2>&1
+    _tg_send "♻️ <b>Restore Selesai</b>
+📁 <code>$(basename "$f")</code>
+🖥 Host: <code>$(hostname)</code>"
+    pause
+}
+
+_do_restore_telegram() {
+    if [[ ! -f "$BOTF" ]]; then
+        err "Bot Telegram belum di-setup. Setup dulu di menu Pengaturan."
+        pause; return
+    fi
+    inf "Mencari backup terbaru dari Telegram..."
+    local hit file_id fname
+    hit=$(_tg_find_latest_doc 'max-backup-.*\.tar\.gz')
+    if [[ -z "$hit" ]]; then
+        err "Tidak ditemukan file backup di chat Telegram."
+        warn "Catatan: bot hanya bisa baca pesan ~24 jam terakhir via getUpdates."
+        warn "Pastikan file backup MASIH ada di chat dan terkirim ke chat ID yang benar."
+        pause; return
+    fi
+    file_id="${hit%%|*}"
+    fname="${hit##*|}"
+    ok "Ditemukan: ${W}${fname}${NC}"
+    mkdir -p "$BACKUPDIR"
+    local out="$BACKUPDIR/${fname}"
+    inf "Download dari Telegram..."
+    if ! _tg_download_doc "$file_id" "$out"; then
+        err "Gagal download file dari Telegram."
+        pause; return
+    fi
+    local sz; sz=$(du -sh "$out" | cut -f1)
+    ok "Tersimpan: ${A3}${out}${NC} (${Y}${sz}${NC})"
+
+    warn "Restore akan menimpa file konfigurasi saat ini!"
+    echo -ne "  ${A3}Ketik ${LR}YES${A3} untuk konfirmasi${NC}: "; read -r cf
+    [[ "$cf" != "YES" ]] && { inf "Dibatalkan."; pause; return; }
+
+    inf "Restoring dari ${W}${fname}${NC}..."
+    if tar -xzPf "$out" -C /; then
+        ok "Restore selesai"
+        systemctl daemon-reload
+        tool_restart_all >/dev/null 2>&1
+        _tg_send "♻️ <b>Restore dari Telegram Selesai</b>
+📁 <code>${fname}</code>
+🖥 Host: <code>$(hostname)</code>"
+    else
+        err "Restore gagal!"
+    fi
     pause
 }
 
