@@ -12,10 +12,10 @@
 #     • Stunnel SSL (443/445/777)  • SSH WebSocket (80/8880/2095/443/2096)
 #     • OpenVPN (TCP 1194 / UDP 2200)
 #     • Xray-core VMess/VLess/Trojan (80/443/8443) + Shadowsocks (8388)
-#     • Trojan-Go (2087)           • BadVPN UDPGW (7100/7200/7300)
+#     • Trojan-Go (2098)           • BadVPN UDPGW (7100/7200/7300)
 #     • Hysteria 2 (5300/7300/36712)
 #     • SlowDNS (53 / 5300)        • WireGuard (51820)
-#     • OHP (80/8080) — opsional
+#     • OHP (8081) — opsional
 #
 # ════════════════════════════════════════════════════════════
 
@@ -380,6 +380,332 @@ _tg_send() {
             -d "chat_id=${CHAT_ID}" -d "text=${msg}" -d "parse_mode=HTML" &>/dev/null
 }
 
+# Kirim file (dokumen) ke Telegram bot. Argumen: <file-path> [caption]
+_tg_send_doc() {
+    [[ ! -f "$BOTF" ]] && return 1
+    # shellcheck disable=SC1090
+    source "$BOTF" 2>/dev/null
+    [[ -z "${BOT_TOKEN:-}" || -z "${CHAT_ID:-}" ]] && return 1
+    local file="$1" caption="${2:-}"
+    [[ ! -f "$file" ]] && return 1
+    curl -s --max-time 120 \
+        -F "chat_id=${CHAT_ID}" \
+        -F "document=@${file}" \
+        -F "caption=${caption}" \
+        -F "parse_mode=HTML" \
+        "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" &>/dev/null
+}
+
+# Ambil file backup terbaru dari chat Telegram bot (via getUpdates).
+# Kriteria: dokumen dengan file_name diawali "max-backup-" dan extension .tar.gz.
+# Argumen: <output-path>. Return 0 jika berhasil download.
+_tg_fetch_doc() {
+    [[ ! -f "$BOTF" ]] && { err "Bot Telegram belum di-setup"; return 1; }
+    # shellcheck disable=SC1090
+    source "$BOTF" 2>/dev/null
+    [[ -z "${BOT_TOKEN:-}" || -z "${CHAT_ID:-}" ]] && { err "BOT_TOKEN/CHAT_ID kosong"; return 1; }
+    local out="$1"
+    [[ -z "$out" ]] && return 1
+
+    local upd
+    upd=$(curl -s --max-time 30 "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=100&offset=-100")
+    [[ -z "$upd" ]] && { err "Gagal getUpdates"; return 1; }
+
+    # Parse JSON pakai python (pasti tersedia)
+    local file_id file_name
+    read -r file_id file_name < <(python3 - "$upd" "$CHAT_ID" <<'PYTG' 2>/dev/null
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+chat_id = str(sys.argv[2])
+best = None
+for upd in data.get("result", []) or []:
+    msg = upd.get("message") or upd.get("channel_post") or {}
+    chat = msg.get("chat", {})
+    if str(chat.get("id")) != chat_id:
+        continue
+    doc = msg.get("document")
+    if not doc: continue
+    name = doc.get("file_name", "")
+    if not (name.startswith("max-backup-") and name.endswith(".tar.gz")):
+        continue
+    ts = msg.get("date", 0)
+    if best is None or ts > best[0]:
+        best = (ts, doc.get("file_id"), name)
+if best:
+    print(best[1], best[2])
+PYTG
+)
+    [[ -z "$file_id" ]] && { err "Tidak ada backup max-backup-*.tar.gz di chat bot"; return 1; }
+
+    inf "Menemukan: ${W}${file_name}${NC}"
+    local fp_resp file_path
+    fp_resp=$(curl -s --max-time 30 "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${file_id}")
+    file_path=$(echo "$fp_resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("file_path",""))' 2>/dev/null)
+    [[ -z "$file_path" ]] && { err "Gagal getFile"; return 1; }
+
+    # Telegram membatasi getFile hanya untuk file < 20MB. Backup biasanya kecil, ok.
+    if curl -s --max-time 300 -o "$out" \
+        "https://api.telegram.org/file/bot${BOT_TOKEN}/${file_path}" && [[ -s "$out" ]]; then
+        ok "Download backup: $(du -sh "$out" | cut -f1)"
+        echo "$file_name" > "${out}.name"
+        return 0
+    fi
+    rm -f "$out"
+    err "Download gagal"
+    return 1
+}
+
+# ════════════════════════════════════════════════════════════
+#  TELEGRAM ACCOUNT-DETAIL BUILDERS
+#  Membentuk pesan HTML detail (sama persis dengan tampilan panel)
+# ════════════════════════════════════════════════════════════
+_brand_name() {
+    local b="MAX PANEL"
+    [[ -f "$STRF" ]] && { # shellcheck disable=SC1090
+        source "$STRF" 2>/dev/null; b="${BRAND:-MAX PANEL}"; }
+    echo "$b"
+}
+
+# tg_msg_ssh <user> <pass> <exp> <maxlogin>
+tg_msg_ssh() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}"
+    local ip dom brand
+    ip=$(get_ip); dom=$(get_domain); brand=$(_brand_name)
+    cat <<EOM
+✅ <b>Akun SSH/OpenSSH — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Username  : <code>${u}</code>
+🔑 Password  : <code>${p}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🖥 IP Publik : <code>${ip}</code>
+🌐 Host       : <code>${dom}</code>
+🔌 OpenSSH   : <code>22</code>
+🔌 Dropbear  : <code>109, 143</code>
+🔒 SSH TLS   : <code>443, 2087</code> (Nginx /ws-ssh)
+🔌 SSH NoTLS : <code>80, 2086</code>  (Nginx /ws-ssh)
+🔒 Stunnel   : <code>990, 446, 110, 444, 445, 777</code>
+📡 OpenVPN   : <code>TCP 1194 / UDP 2200</code>
+📡 UDPGW     : <code>7100, 7200, 7300</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+EOM
+}
+
+# tg_msg_ovpn <user> <pass> <exp> <maxlogin>
+tg_msg_ovpn() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}"
+    local ip dom brand
+    ip=$(get_ip); dom=$(get_domain); brand=$(_brand_name)
+    cat <<EOM
+✅ <b>Akun OpenVPN — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Username : <code>${u}</code>
+🔑 Password : <code>${p}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🖥 IP       : <code>${ip}</code>
+🌐 Host      : <code>${dom}</code>
+🔌 TCP      : <code>1194</code>
+🔌 UDP      : <code>2200</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 MaxLogin : <b>${ml} device</b>
+📅 Expired  : <b>${e}</b>
+
+📄 Config TCP & UDP terlampir di pesan berikutnya.
+EOM
+}
+
+# tg_msg_slow <user> <pass> <exp> <maxlogin>
+tg_msg_slow() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}"
+    local dom pub brand
+    dom=$(get_domain); brand=$(_brand_name)
+    pub=$(cat "$SLOW_DIR/server.pub" 2>/dev/null || echo "-")
+    cat <<EOM
+✅ <b>Akun SlowDNS — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Username  : <code>${u}</code>
+🔑 Password  : <code>${p}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🌐 NS Domain : <code>${dom}</code>
+🔌 Port      : <code>53 (UDP), 5300</code>
+🔑 PubKey    : <code>${pub}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+EOM
+}
+
+# Multi-port v2ray (sesuai gambar referensi panel)
+V2RAY_HTTP_PORTS="80, 8080, 2086, 8880"
+V2RAY_TLS_PORTS="443, 2083, 2087, 8443"
+
+# tg_msg_vmess <user> <uuid> <exp> <maxlogin>
+tg_msg_vmess() {
+    local u="$1" id="$2" e="$3" ml="${4:-2}"
+    local dom brand v_tls v_ntls
+    dom=$(get_domain); brand=$(_brand_name)
+    v_tls=$(printf '%s' "{\"v\":\"2\",\"ps\":\"${u}-TLS\",\"add\":\"${dom}\",\"port\":\"443\",\"id\":\"${id}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${dom}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${dom}\"}" | base64 -w0)
+    v_ntls=$(printf '%s' "{\"v\":\"2\",\"ps\":\"${u}-HTTP\",\"add\":\"${dom}\",\"port\":\"80\",\"id\":\"${id}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${dom}\",\"path\":\"/vmess\",\"tls\":\"none\"}" | base64 -w0)
+    cat <<EOM
+✅ <b>Akun VMess — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Remark    : <code>${u}</code>
+🔑 UUID      : <code>${id}</code>
+🌐 Host       : <code>${dom}</code>
+🔌 Port w/o TLS : <code>${V2RAY_HTTP_PORTS}</code>
+🔒 Port TLS  : <code>${V2RAY_TLS_PORTS}</code>
+🛣 Path      : <code>/vmess</code>
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>VMess TLS</b>
+<code>vmess://${v_tls}</code>
+
+🔗 <b>VMess HTTP</b>
+<code>vmess://${v_ntls}</code>
+EOM
+}
+
+# tg_msg_vless <user> <uuid> <exp> <maxlogin>
+tg_msg_vless() {
+    local u="$1" id="$2" e="$3" ml="${4:-2}"
+    local dom brand
+    dom=$(get_domain); brand=$(_brand_name)
+    cat <<EOM
+✅ <b>Akun VLess — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Remark    : <code>${u}</code>
+🔑 UUID      : <code>${id}</code>
+🌐 Host       : <code>${dom}</code>
+🔌 Port w/o TLS : <code>${V2RAY_HTTP_PORTS}</code>
+🔒 Port TLS  : <code>${V2RAY_TLS_PORTS}</code>
+🛣 WS Path   : <code>/vless</code>
+🛣 gRPC SVC  : <code>vless-grpc</code>
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>VLess WS TLS</b>
+<code>vless://${id}@${dom}:443?path=/vless&amp;security=tls&amp;encryption=none&amp;host=${dom}&amp;type=ws&amp;sni=${dom}#${u}-TLS</code>
+
+🔗 <b>VLess WS HTTP</b>
+<code>vless://${id}@${dom}:80?path=/vless&amp;encryption=none&amp;host=${dom}&amp;type=ws#${u}-HTTP</code>
+
+🔗 <b>VLess gRPC TLS</b>
+<code>vless://${id}@${dom}:443?mode=gun&amp;security=tls&amp;encryption=none&amp;type=grpc&amp;serviceName=vless-grpc&amp;sni=${dom}#${u}-gRPC</code>
+EOM
+}
+
+# tg_msg_trojan <user> <password> <exp> <maxlogin>
+tg_msg_trojan() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}"
+    local dom brand
+    dom=$(get_domain); brand=$(_brand_name)
+    cat <<EOM
+✅ <b>Akun Trojan — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Remark    : <code>${u}</code>
+🔑 Password  : <code>${p}</code>
+🌐 Host       : <code>${dom}</code>
+🔌 Port w/o TLS : <code>${V2RAY_HTTP_PORTS}</code>
+🔒 Port TLS  : <code>${V2RAY_TLS_PORTS}</code>
+🛣 WS Path   : <code>/trojan-ws</code>
+🛣 gRPC SVC  : <code>trojan-grpc</code>
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>Trojan WS TLS</b>
+<code>trojan://${p}@${dom}:443?path=/trojan-ws&amp;security=tls&amp;host=${dom}&amp;type=ws&amp;sni=${dom}#${u}-WS</code>
+
+🔗 <b>Trojan gRPC TLS</b>
+<code>trojan://${p}@${dom}:443?mode=gun&amp;security=tls&amp;type=grpc&amp;serviceName=trojan-grpc&amp;sni=${dom}#${u}-gRPC</code>
+EOM
+}
+
+# tg_msg_ss <user> <password> <exp> <maxlogin>
+tg_msg_ss() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}"
+    local dom brand link
+    dom=$(get_domain); brand=$(_brand_name)
+    link=$(printf '%s' "aes-128-gcm:${p}@${dom}:8388" | base64 -w0)
+    cat <<EOM
+✅ <b>Akun Shadowsocks — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Username  : <code>${u}</code>
+🔑 Password  : <code>${p}</code>
+🌐 Host       : <code>${dom}</code>
+🔌 Port      : <code>8388</code>
+🔐 Method    : <code>aes-128-gcm</code>
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>SS Link</b>
+<code>ss://${link}#${u}</code>
+EOM
+}
+
+# tg_msg_tgo <user> <password> <exp> <maxlogin>
+tg_msg_tgo() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}"
+    local dom brand
+    dom=$(get_domain); brand=$(_brand_name)
+    cat <<EOM
+✅ <b>Akun Trojan-Go — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Username  : <code>${u}</code>
+🔑 Password  : <code>${p}</code>
+🌐 Host       : <code>${dom}</code>
+🔌 Port      : <code>2098</code>
+🛣 Path      : <code>/trojan-go</code>
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>Trojan-Go Link</b>
+<code>trojan-go://${p}@${dom}:2098?sni=${dom}&amp;type=ws&amp;path=%2Ftrojan-go#${u}</code>
+EOM
+}
+
+# tg_msg_hy <user> <password> <exp> <maxlogin>
+tg_msg_hy() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}"
+    local dom brand
+    dom=$(get_domain); brand=$(_brand_name)
+    cat <<EOM
+✅ <b>Akun Hysteria 2 — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Username  : <code>${u}</code>
+🔑 Password  : <code>${p}</code>
+🌐 Host       : <code>${dom}</code>
+🔌 Port      : <code>UDP 36712</code>
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>Hysteria 2 Link</b>
+<code>hy2://${u}:${p}@${dom}:36712?insecure=1&amp;sni=${dom}#${u}</code>
+EOM
+}
+
+# tg_msg_wg <user> <ip> <pubkey> <exp>
+tg_msg_wg() {
+    local u="$1" ip="$2" pub="$3" e="$4"
+    local srv brand
+    srv=$(get_domain); brand=$(_brand_name)
+    cat <<EOM
+✅ <b>WireGuard Peer — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Name      : <code>${u}</code>
+📡 IP Peer   : <code>${ip}</code>
+🔑 PubKey    : <code>${pub}</code>
+🔌 Endpoint  : <code>${srv}:51820</code>
+📅 Expired   : <b>${e}</b>
+
+📄 File config terlampir di pesan berikutnya.
+EOM
+}
+
 # ════════════════════════════════════════════════════════════
 #  BANNER / LOGO  — MAX PANEL ASCII
 # ════════════════════════════════════════════════════════════
@@ -540,11 +866,11 @@ show_box_ssh() {
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} 🖥  ${DIM}IP Publik${NC} : ${LG}%s${NC}\n" "$ip"
     printf  "  ${A1}│${NC} 🌐 ${DIM}Host    ${NC} : ${W}%s${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}Port SSH ${NC}: ${Y}22${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}OpenSSH  ${NC}: ${Y}22${NC}\n"
     printf  "  ${A1}│${NC} 🔌 ${DIM}Dropbear ${NC}: ${Y}109, 143${NC}\n"
-    printf  "  ${A1}│${NC} 🔒 ${DIM}SSL/Stun.${NC}: ${Y}445, 777${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}80 (/ws-ssh)${NC}\n"
-    printf  "  ${A1}│${NC} 🔒 ${DIM}WS HTTPS ${NC}: ${Y}443 (/ws-ssh)${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}SSH TLS  ${NC}: ${Y}443, 2087${NC}  ${DIM}(via Nginx /ws-ssh)${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}SSH NoTLS${NC}: ${Y}80, 2086${NC}   ${DIM}(via Nginx /ws-ssh)${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}Stunnel  ${NC}: ${Y}990, 446, 110, 444, 445, 777${NC}\n"
     printf  "  ${A1}│${NC} 📡 ${DIM}OpenVPN  ${NC}: ${Y}TCP 1194 / UDP 2200${NC}\n"
     printf  "  ${A1}│${NC} 📡 ${DIM}UDPGW    ${NC}: ${Y}7100, 7200, 7300${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
@@ -661,8 +987,10 @@ install_ssh() {
     ok "Dropbear siap: 109, 143"
 
     # ── Stunnel SSL ─────────────────────────────────────────────────────────
-    # FIX: port 443 dihandle Nginx (TLS termination). Stunnel HANYA listen di 445 & 777.
-    inf "Konfigurasi Stunnel SSL (port 445 → Dropbear:109, 777 → OpenSSH:22)..."
+    # Mengikuti referensi panel (gambar): SSH-over-stunnel dengarkan di banyak port:
+    #   990, 446, 110, 444, 445, 777   (port 443 dipegang Nginx untuk v2ray)
+    # Semua diteruskan ke Dropbear:109 (kecuali 777 → OpenSSH:22 untuk kompatibilitas)
+    inf "Konfigurasi Stunnel SSL (multi-port → Dropbear:109 / OpenSSH:22)..."
     mkdir -p /etc/stunnel
     if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
         openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
@@ -686,6 +1014,22 @@ socket = r:TCP_NODELAY=1
 accept = 445
 connect = 127.0.0.1:109
 
+[dropbear-ssl-990]
+accept = 990
+connect = 127.0.0.1:109
+
+[dropbear-ssl-446]
+accept = 446
+connect = 127.0.0.1:109
+
+[dropbear-ssl-110]
+accept = 110
+connect = 127.0.0.1:109
+
+[dropbear-ssl-444]
+accept = 444
+connect = 127.0.0.1:109
+
 [openssh-ssl-777]
 accept = 777
 connect = 127.0.0.1:22
@@ -699,7 +1043,7 @@ STUN
     pkill -9 stunnel4 2>/dev/null; rm -f /var/run/stunnel4/stunnel.pid
     sleep 1
     systemctl restart stunnel4 2>/dev/null
-    ok "Stunnel SSL siap: 445, 777"
+    ok "Stunnel SSL siap: 990, 446, 110, 444, 445, 777"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -826,7 +1170,7 @@ XEOF
 }
 
 # ════════════════════════════════════════════════════════════
-#  INSTALLER — Trojan-Go (port 2087)
+#  INSTALLER — Trojan-Go (port 2098)
 # ════════════════════════════════════════════════════════════
 install_trojan_go() {
     inf "Install Trojan-Go..."
@@ -867,7 +1211,7 @@ install_trojan_go() {
 {
   "run_type": "server",
   "local_addr": "0.0.0.0",
-  "local_port": 2087,
+  "local_port": 2098,
   "remote_addr": "127.0.0.1",
   "remote_port": 80,
   "password": [],
@@ -905,7 +1249,7 @@ TGEOF
     systemctl daemon-reload
     systemctl enable trojan-go &>/dev/null
     systemctl restart trojan-go 2>/dev/null
-    is_up trojan-go && ok "Trojan-Go aktif di port 2087" || warn "Trojan-Go gagal start"
+    is_up trojan-go && ok "Trojan-Go aktif di port 2098" || warn "Trojan-Go gagal start"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1471,10 +1815,16 @@ install_nginx() {
 # === SHARED PROXY HEADERS ===========================================
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
 
-# === HTTP 80 (plain) =================================================
+# === HTTP 80 + 8080 + 2086 + 8880 (plain) ===========================
 server {
-    listen 80 default_server;
+    listen 80    default_server;
     listen [::]:80 default_server;
+    listen 8080;
+    listen [::]:8080;
+    listen 2086;
+    listen [::]:2086;
+    listen 8880;
+    listen [::]:8880;
     server_name ${dom} _;
     root /var/www/html;
     index index.html;
@@ -1527,10 +1877,14 @@ server {
     location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
 }
 
-# === TLS 443 (primary) ===============================================
+# === TLS 443 + 2083 + 2087 (primary) =================================
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
+    listen 2083 ssl http2;
+    listen [::]:2083 ssl http2;
+    listen 2087 ssl http2;
+    listen [::]:2087 ssl http2;
     server_name ${dom} _;
 
     ssl_certificate     /etc/xray/xray.crt;
@@ -1647,7 +2001,7 @@ install_ohp() {
             return
         fi
     fi
-    # Service OHP port 8080
+    # Service OHP port 8081
     cat > /etc/systemd/system/ohp.service <<OHPEOF
 [Unit]
 Description=OHP OpenSSH Over HTTP
@@ -1656,7 +2010,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=$OHP_BIN -port=8080 -bind=0.0.0.0 -proxy=127.0.0.1:22
+ExecStart=$OHP_BIN -port=8081 -bind=0.0.0.0 -proxy=127.0.0.1:22
 Restart=on-failure
 RestartSec=3
 
@@ -1666,7 +2020,7 @@ OHPEOF
     systemctl daemon-reload
     systemctl enable ohp &>/dev/null
     systemctl restart ohp 2>/dev/null
-    ok "OHP aktif di port 8080"
+    ok "OHP aktif di port 8081"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1718,7 +2072,7 @@ do_install_all() {
     _step  4 "Generate SSL self-signed (fallback)";  gen_selfsigned_ssl
     _step  5 "OpenSSH + Dropbear + Stunnel";         install_ssh
     _step  6 "Xray-core (VMess/VLess/Trojan/SS)";    install_xray
-    _step  7 "Trojan-Go (port 2087)";                install_trojan_go
+    _step  7 "Trojan-Go (port 2098)";                install_trojan_go
     _step  8 "Hysteria 2 (UDP 36712 + range)";       install_hysteria
     _step  9 "BadVPN UDPGW (7100/7200/7300)";        install_udpgw
     _step 10 "OpenVPN (TCP 1194 + UDP 2200)";        install_openvpn
@@ -1754,21 +2108,21 @@ do_install_all() {
     echo -e "  ${A1}${_DASH}${NC}"
     printf  "  ${A3}•${NC} OpenSSH         : ${Y}22${NC}\n"
     printf  "  ${A3}•${NC} Dropbear        : ${Y}109, 143${NC}\n"
-    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}445, 777${NC}\n"
-    printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}80${NC}  — paths: /vmess /vless /trojan-ws /ws-ssh\n"
-    printf  "  ${A3}•${NC} Nginx (TLS)     : ${Y}443${NC}, ${Y}8443${NC} alt — + /vless-grpc /trojan-grpc\n"
+    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}990, 446, 110, 444, 445, 777${NC}\n"
+    printf  "  ${A3}•${NC} Nginx HTTP      : ${Y}80, 8080, 2086, 8880${NC} — paths: /vmess /vless /trojan-ws /ws-ssh\n"
+    printf  "  ${A3}•${NC} Nginx TLS       : ${Y}443, 2083, 2087, 8443${NC} — + /vless-grpc /trojan-grpc\n"
     printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}/ws-ssh${NC} (→ internal 127.0.0.1:8880)\n"
     printf  "  ${A3}•${NC} OpenVPN         : ${Y}TCP 1194, UDP 2200${NC}\n"
-    printf  "  ${A3}•${NC} Xray VMess WS   : ${Y}/vmess (80, 443)${NC}\n"
-    printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (80, 443)${NC} + gRPC ${Y}443${NC}\n"
-    printf  "  ${A3}•${NC} Xray Trojan     : ${Y}/trojan-ws (443)${NC} + gRPC ${Y}443${NC}\n"
-    printf  "  ${A3}•${NC} Shadowsocks-22  : ${Y}8388${NC}\n"
-    printf  "  ${A3}•${NC} Trojan-Go       : ${Y}2087${NC}\n"
+    printf  "  ${A3}•${NC} Xray VMess WS   : path ${Y}/vmess${NC}  (HTTP/TLS multi-port via Nginx)\n"
+    printf  "  ${A3}•${NC} Xray VLess WS   : path ${Y}/vless${NC}  + gRPC svc ${Y}vless-grpc${NC}\n"
+    printf  "  ${A3}•${NC} Xray Trojan     : path ${Y}/trojan-ws${NC} + gRPC svc ${Y}trojan-grpc${NC}\n"
+    printf  "  ${A3}•${NC} Shadowsocks     : ${Y}8388${NC}\n"
+    printf  "  ${A3}•${NC} Trojan-Go       : ${Y}2098${NC}\n"
     printf  "  ${A3}•${NC} BadVPN UDPGW    : ${Y}7100, 7200, 7300${NC}\n"
     printf  "  ${A3}•${NC} Hysteria 2      : ${Y}UDP 36712 (+ 5300, 7300)${NC}\n"
     printf  "  ${A3}•${NC} SlowDNS         : ${Y}53 → 5300${NC}\n"
     printf  "  ${A3}•${NC} WireGuard       : ${Y}UDP 51820${NC}\n"
-    printf  "  ${A3}•${NC} OHP (opsional)  : ${Y}8080${NC}\n"
+    printf  "  ${A3}•${NC} OHP (opsional)  : ${Y}8081${NC}\n"
     echo -e "  ${A1}${_DASH}${NC}"
     echo ""
     echo -e "  ${DIM}Ketik ${A1}menu-max${NC}${DIM} kapan saja untuk membuka panel.${NC}"
@@ -1853,11 +2207,7 @@ ssh_add() {
 
     show_box_ssh "$u" "$p" "$exp" "$ml"
 
-    _tg_send "✅ <b>Akun SSH Baru — MAX</b>
-👤 User: <code>${u}</code>
-🔑 Pass: <code>${p}</code>
-📅 Exp : ${exp}
-🔒 ML  : ${ml}"
+    _tg_send "$(tg_msg_ssh "$u" "$p" "$exp" "$ml")"
 
     pause
 }
@@ -2120,10 +2470,7 @@ vmess_add() {
     echo -e "  ${LG}vmess://${vmess_ntls}${NC}"
     echo ""
 
-    _tg_send "✅ <b>VMess Baru — MAX</b>
-👤 <code>${u}</code>
-🔑 <code>${uuid}</code>
-📅 ${exp} | 🔒 ${ml} dev"
+    _tg_send "$(tg_msg_vmess "$u" "$uuid" "$exp" "$ml")"
 
     pause
 }
@@ -2134,7 +2481,8 @@ vmess_trial() {
     local u="trial-vmess-$(date +%s | tail -c 5)"
     local uuid; uuid=$(rand_uuid)
     local exp; exp=$(mk_exp 1)
-    echo "${u}|${uuid}|TRIAL|${exp}|1" >> "$VMESS_DB"
+    # FIX: format DB harus 4 kolom (user|uuid|exp|maxlogin), bukan 5.
+    echo "${u}|${uuid}|${exp}|1" >> "$VMESS_DB"
     set_maxlogin "$u" "1"
     _xray_sync_clients
 
@@ -2222,8 +2570,7 @@ vless_add() {
     echo -e "  ${DIM}🔗 Link VLess gRPC alt-TLS (port 8443):${NC}"
     echo -e "  ${DIM}vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
-    _tg_send "✅ <b>VLess Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${uuid}</code>  📅 ${exp}"
+    _tg_send "$(tg_msg_vless "$u" "$uuid" "$exp" "$ml")"
     pause
 }
 
@@ -2307,8 +2654,7 @@ trojan_add() {
     echo -e "  ${DIM}🔗 Link Trojan gRPC alt-TLS (port 8443):${NC}"
     echo -e "  ${DIM}trojan://${p}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
-    _tg_send "✅ <b>Trojan Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>  📅 ${exp}"
+    _tg_send "$(tg_msg_trojan "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2454,6 +2800,7 @@ ss_add() {
     echo -e "  ${DIM}🔗 Link SS :${NC}"
     echo -e "  ${LG}ss://${link}#${u}${NC}"
     echo ""
+    _tg_send "$(tg_msg_ss "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2476,7 +2823,7 @@ ss_list() {
 }
 
 # ════════════════════════════════════════════════════════════
-#  USER MANAGEMENT — Trojan-Go (standalone, port 2087)
+#  USER MANAGEMENT — Trojan-Go (standalone, port 2098)
 # ════════════════════════════════════════════════════════════
 _trojango_sync() {
     [[ ! -f "$TROJANGO_CFG" ]] && return
@@ -2524,17 +2871,16 @@ tgo_add() {
     printf  "  ${A1}│${NC} 👤 ${DIM}Username${NC} : ${W}%s${NC}\n" "$u"
     printf  "  ${A1}│${NC} 🔑 ${DIM}Password${NC} : ${A3}%s${NC}\n" "$p"
     printf  "  ${A1}│${NC} 🌐 ${DIM}Host    ${NC} : ${W}%s${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}Port    ${NC} : ${Y}2087${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}Port    ${NC} : ${Y}2098${NC}\n"
     printf  "  ${A1}│${NC} 🛣  ${DIM}Path    ${NC} : ${Y}/trojan-go${NC}\n"
     printf  "  ${A1}│${NC} 📅 ${DIM}Expired ${NC} : ${Y}%s${NC}\n" "$exp"
     printf  "  ${A1}│${NC} 🔒 ${DIM}MaxLogin${NC} : ${Y}%s${NC}\n" "$ml"
     echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
     echo ""
     echo -e "  ${DIM}🔗 Link Trojan-Go:${NC}"
-    echo -e "  ${LG}trojan-go://${p}@${dom}:2087?sni=${dom}&type=ws&path=%2Ftrojan-go#${u}${NC}"
+    echo -e "  ${LG}trojan-go://${p}@${dom}:2098?sni=${dom}&type=ws&path=%2Ftrojan-go#${u}${NC}"
     echo ""
-    _tg_send "✅ <b>Trojan-Go Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send "$(tg_msg_tgo "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2663,8 +3009,7 @@ hy_add() {
     echo -e "  ${DIM}🔗 Link Hysteria 2:${NC}"
     echo -e "  ${LG}hy2://${u}:${p}@${dom}:36712?insecure=1&sni=${dom}#${u}${NC}"
     echo ""
-    _tg_send "✅ <b>Hysteria Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send "$(tg_msg_hy "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2759,8 +3104,10 @@ ovpn_add() {
     printf  "  ${A1}│${NC} 📄 ${DIM}Config UDP${NC}: ${W}/etc/openvpn/client/%s/%s-udp.ovpn${NC}\n" "$u" "$u"
     echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
     echo ""
-    _tg_send "✅ <b>OpenVPN Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send "$(tg_msg_ovpn "$u" "$p" "$exp" "$ml")"
+    # Kirim file .ovpn TCP & UDP sebagai dokumen agar user tinggal download
+    _tg_send_doc "/etc/openvpn/client/${u}/${u}-tcp.ovpn" "📄 Config OpenVPN TCP — ${u}"
+    _tg_send_doc "/etc/openvpn/client/${u}/${u}-udp.ovpn" "📄 Config OpenVPN UDP — ${u}"
     pause
 }
 
@@ -2949,8 +3296,8 @@ WGCLI
         qrencode -t ANSIUTF8 < "$cfile"
         echo ""
     fi
-    _tg_send "✅ <b>WireGuard Peer — MAX</b>
-👤 <code>${u}</code>  📡 <code>${ip}</code>"
+    _tg_send "$(tg_msg_wg "$u" "$ip" "$pubk" "$exp")"
+    _tg_send_doc "$cfile" "📄 Config WireGuard — ${u}"
     pause
 }
 
@@ -3059,6 +3406,7 @@ slow_add() {
     printf  "  ${A1}│${NC} 📅 ${DIM}Expired ${NC} : ${Y}%s${NC}\n" "$exp"
     echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
     echo ""
+    _tg_send "$(tg_msg_slow "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -3520,6 +3868,123 @@ tool_set_banner() {
     pause
 }
 
+# ════════════════════════════════════════════════════════════
+#  CEK SEMUA PROXY — All-in-one connectivity / status checker
+# ────────────────────────────────────────────────────────────
+#  Memeriksa semua port SSH dan v2ray, menampilkan status tabel
+#  dengan warna ●LG (open) / ●LR (closed) / ●Y (filtered).
+# ════════════════════════════════════════════════════════════
+_check_port() {
+    # _check_port <host> <port> <proto: tcp|udp>
+    local host="$1" port="$2" proto="${3:-tcp}"
+    if [[ "$proto" == "udp" ]]; then
+        # UDP susah dicek pasti — cek socket listen lokal saja
+        if ss -ulnH 2>/dev/null | awk '{print $5}' | grep -qE "(:|^)${port}\$"; then
+            echo "open"; return
+        fi
+        echo "closed"; return
+    fi
+    # TCP: coba connect via /dev/tcp dengan timeout
+    if timeout 3 bash -c "exec 9<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+        echo "open"; return
+    fi
+    echo "closed"
+}
+
+_proxy_row() {
+    # _proxy_row <label> <port> <proto>
+    local label="$1" port="$2" proto="${3:-tcp}"
+    local host="127.0.0.1" st col icon
+    st=$(_check_port "$host" "$port" "$proto")
+    case "$st" in
+        open)   col="$LG"; icon="●" ;;
+        closed) col="$LR"; icon="○" ;;
+        *)      col="$Y";  icon="◐" ;;
+    esac
+    printf "  %b%s%b  %-22s %-12s %b%-7s%b\n" \
+        "$col" "$icon" "$NC" "$label" "$port/$proto" "$col" "$st" "$NC"
+}
+
+cek_all_proxy() {
+    show_header
+    _top; _btn "  ${IT}${AL}🔎  CEK SEMUA PROXY (SSH + V2Ray)${NC}"; _bot; echo ""
+    echo -e "  ${DIM}Status diuji terhadap localhost (TCP) / socket listen (UDP).${NC}"
+    echo ""
+
+    printf "  ${BLD}${A3}    %-22s %-12s %s${NC}\n" "PROTOKOL/SERVICE" "PORT" "STATUS"
+    _sep
+    echo -e "  ${BLD}${AL}  ── SSH ──${NC}"
+    _proxy_row "OpenSSH"            22    tcp
+    _proxy_row "Dropbear (109)"     109   tcp
+    _proxy_row "Dropbear (143)"     143   tcp
+    _proxy_row "SSH NoTLS / 80"     80    tcp
+    _proxy_row "SSH NoTLS / 2086"   2086  tcp
+    _proxy_row "SSH NoTLS / 8080"   8080  tcp
+    _proxy_row "SSH NoTLS / 8880"   8880  tcp
+    _proxy_row "SSH TLS   / 443"    443   tcp
+    _proxy_row "SSH TLS   / 2087"   2087  tcp
+    _proxy_row "Stunnel SSL 990"    990   tcp
+    _proxy_row "Stunnel SSL 446"    446   tcp
+    _proxy_row "Stunnel SSL 110"    110   tcp
+    _proxy_row "Stunnel SSL 444"    444   tcp
+    _proxy_row "Stunnel SSL 445"    445   tcp
+    _proxy_row "Stunnel SSL 777"    777   tcp
+    _proxy_row "OpenVPN TCP"        1194  tcp
+    _proxy_row "OpenVPN UDP"        2200  udp
+    _proxy_row "BadVPN UDPGW 7100"  7100  udp
+    _proxy_row "BadVPN UDPGW 7200"  7200  udp
+    _proxy_row "BadVPN UDPGW 7300"  7300  udp
+    _proxy_row "OHP (opsional)"     8081  tcp
+    _proxy_row "SlowDNS UDP"        5300  udp
+
+    echo ""
+    echo -e "  ${BLD}${AL}  ── V2Ray (via Nginx) ──${NC}"
+    _proxy_row "V2Ray HTTP /  80"   80    tcp
+    _proxy_row "V2Ray HTTP / 8080"  8080  tcp
+    _proxy_row "V2Ray HTTP / 2086"  2086  tcp
+    _proxy_row "V2Ray HTTP / 8880"  8880  tcp
+    _proxy_row "V2Ray TLS  /  443"  443   tcp
+    _proxy_row "V2Ray TLS  / 2083"  2083  tcp
+    _proxy_row "V2Ray TLS  / 2087"  2087  tcp
+    _proxy_row "V2Ray TLS  / 8443"  8443  tcp
+    _proxy_row "Trojan-Go"          2098  tcp
+    _proxy_row "Shadowsocks"        8388  tcp
+    _proxy_row "Hysteria 2 (UDP)"   36712 udp
+    _proxy_row "WireGuard (UDP)"    51820 udp
+
+    echo ""
+    _sep
+    # Cek juga path Nginx (HTTP 200/404 sederhana dari path utama)
+    echo -e "  ${BLD}${AL}  ── HTTP Path Check (Nginx) ──${NC}"
+    local dom; dom=$(get_domain)
+    _check_path() {
+        local path="$1"
+        local code
+        code=$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' \
+               -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
+               "http://127.0.0.1${path}" 2>/dev/null || echo "000")
+        local col icon st
+        case "$code" in
+            101|200|400|404|426) col="$LG"; icon="●"; st="reachable" ;;
+            502|503|504)         col="$Y";  icon="◐"; st="backend down" ;;
+            000)                 col="$LR"; icon="○"; st="unreachable" ;;
+            *)                   col="$LG"; icon="●"; st="HTTP $code" ;;
+        esac
+        printf "  %b%s%b  %-22s %-12s %b%-12s%b\n" \
+            "$col" "$icon" "$NC" "${path}" "HTTP" "$col" "$st" "$NC"
+    }
+    _check_path "/"
+    _check_path "/vmess"
+    _check_path "/vless"
+    _check_path "/trojan-ws"
+    _check_path "/ws-ssh"
+    _sep
+
+    echo ""
+    inf "Selesai cek semua proxy. ${DIM}(Cek dari sisi VPS — firewall/cloud bisa berbeda)${NC}"
+    pause
+}
+
 tool_set_limit() {
     show_header
     _top; _btn "  ${IT}${AL}🚦  LIMIT TOTAL USER${NC}"; _bot; echo ""
@@ -3563,12 +4028,28 @@ do_backup() {
     [[ -d /etc/nginx/conf.d ]] && files+=("/etc/nginx/conf.d")
 
     if tar -czPf "$out" "${files[@]}" 2>/dev/null; then
-        local sz; sz=$(du -sh "$out" | cut -f1)
+        local sz hn
+        sz=$(du -sh "$out" | cut -f1)
+        hn=$(hostname)
         ok "Backup: ${W}$(basename "$out")${NC} (${Y}${sz}${NC})"
         ok "Path : ${A3}${out}${NC}"
-        _tg_send "💾 <b>Backup Berhasil — MAX</b>
-📁 <code>$(basename "$out")</code>
-📦 Size: ${sz}"
+
+        # Kirim notifikasi + file backup ke Telegram
+        if [[ -f "$BOTF" ]]; then
+            inf "Mengunggah backup ke Telegram..."
+            _tg_send "💾 <b>Backup MAX PANEL</b>
+🖥 Host : <code>${hn}</code>
+📁 File : <code>$(basename "$out")</code>
+📦 Size : <code>${sz}</code>
+⏱ Waktu: <code>$(TZ=Asia/Jakarta date '+%Y-%m-%d %H:%M:%S')</code>"
+            if _tg_send_doc "$out" "📦 Backup MAX PANEL — ${hn} — $(basename "$out")"; then
+                ok "Backup terkirim ke Telegram"
+            else
+                warn "Gagal upload ke Telegram (cek BOT_TOKEN/CHAT_ID atau ukuran file >50MB)"
+            fi
+        else
+            warn "Telegram bot belum di-setup — backup hanya disimpan lokal"
+        fi
     else
         err "Backup gagal!"
     fi
@@ -3602,6 +4083,46 @@ do_restore() {
     tar -xzPf "$f" -C / && ok "Restore selesai" || err "Restore gagal!"
     systemctl daemon-reload
     tool_restart_all >/dev/null 2>&1
+    pause
+}
+
+# ────────────────────────────────────────────────────────────
+# Restore otomatis: ambil file backup terbaru dari chat bot Telegram.
+# Bot perlu pernah menerima file max-backup-*.tar.gz (mis. dari do_backup).
+# ────────────────────────────────────────────────────────────
+do_restore_telegram() {
+    show_header
+    _top; _btn "  ${IT}${AL}📥  RESTORE DARI TELEGRAM BOT${NC}"; _bot; echo ""
+    if [[ ! -f "$BOTF" ]]; then
+        err "Bot Telegram belum di-setup. Jalankan menu Pengaturan → Setup Telegram Bot."
+        pause; return
+    fi
+    inf "Mencari backup terbaru di chat bot..."
+    mkdir -p "$BACKUPDIR"
+    local out="$BACKUPDIR/max-backup-from-tg-$(date +%Y%m%d_%H%M%S).tar.gz"
+    if ! _tg_fetch_doc "$out"; then
+        warn "Pastikan kamu sudah men-forward / kirim file max-backup-*.tar.gz ke bot,"
+        warn "dan tunggu beberapa detik sebelum mencoba lagi."
+        pause; return
+    fi
+    local sz; sz=$(du -sh "$out" | cut -f1)
+    ok "File diterima: ${W}$(basename "$out")${NC} (${sz})"
+    echo ""
+    warn "Restore akan menimpa file konfigurasi saat ini!"
+    echo -ne "  ${A3}Ketik ${LR}YES${A3} untuk konfirmasi${NC}: "; read -r cf
+    [[ "$cf" != "YES" ]] && { inf "Dibatalkan."; pause; return; }
+
+    inf "Restoring dari ${W}$(basename "$out")${NC}..."
+    if tar -xzPf "$out" -C / 2>/dev/null; then
+        ok "Restore selesai"
+        systemctl daemon-reload
+        tool_restart_all >/dev/null 2>&1
+        _tg_send "♻️ <b>Restore MAX PANEL Sukses</b>
+🖥 Host : <code>$(hostname)</code>
+📁 File : <code>$(basename "$out")</code>"
+    else
+        err "Restore gagal!"
+    fi
     pause
 }
 
@@ -4025,7 +4546,7 @@ menu_ss() {
 menu_trojan_go() {
     while true; do
         show_header
-        _top; _btn "  ${IT}${AL}⚡  TROJAN-GO — port 2087${NC}"
+        _top; _btn "  ${IT}${AL}⚡  TROJAN-GO — port 2098${NC}"
         _sep; _btn "  ${A2}[1]${NC}  ➕  Buat Akun"
         _sep; _btn "  ${A2}[2]${NC}  🎁  Trial 1 jam"
         _sep; _btn "  ${A2}[3]${NC}  🗑   Hapus Akun"
@@ -4149,16 +4670,17 @@ menu_backup() {
     while true; do
         show_header
         _top; _btn "  ${IT}${AL}💾  BACKUP & RESTORE${NC}"
-        _sep; _btn "  ${A2}[1]${NC}  💾  Backup Sekarang"
-        _sep; _btn "  ${A2}[2]${NC}  ♻️   Restore dari File"
-        _sep; _btn "  ${A2}[3]${NC}  📋  List File Backup"
-        _sep; _btn "  ${A2}[4]${NC}  🗑   Hapus Backup Lama"
+        _sep; _btn "  ${A2}[1]${NC}  💾  Backup Sekarang (auto-kirim ke Telegram)"
+        _sep; _btn "  ${A2}[2]${NC}  ♻️   Restore dari File Lokal"
+        _sep; _btn "  ${A2}[3]${NC}  📥  Restore dari Telegram Bot"
+        _sep; _btn "  ${A2}[4]${NC}  📋  List File Backup"
+        _sep; _btn "  ${A2}[5]${NC}  🗑   Hapus Backup Lama (>30 hari)"
         _sep; _btn "  ${LR}[0]${NC}  ◀   Kembali"
         _bot; echo ""
         echo -ne "  ${A1}›${NC} "; read -r ch
         case $ch in
-            1) do_backup ;; 2) do_restore ;;
-            3)
+            1) do_backup ;; 2) do_restore ;; 3) do_restore_telegram ;;
+            4)
                 show_header; _top; _btn "  ${IT}${AL}📋  LIST BACKUP${NC}"; _bot
                 if [[ -d "$BACKUPDIR" ]]; then
                     ls -lh "$BACKUPDIR" 2>/dev/null | awk 'NR>1{printf "  %s  %s\n", $9, $5}'
@@ -4166,7 +4688,7 @@ menu_backup() {
                     warn "Belum ada backup"
                 fi
                 pause ;;
-            4)
+            5)
                 show_header; _top; _btn "  ${IT}${AL}🗑  HAPUS BACKUP > 30 HARI${NC}"; _bot
                 find "$BACKUPDIR" -name 'max-backup-*.tar.gz' -mtime +30 -delete -print 2>/dev/null
                 ok "Backup > 30 hari dihapus"; pause ;;
@@ -4216,10 +4738,10 @@ menu_about() {
    • OpenSSH (22)                  • Dropbear (109, 143)
    • Stunnel SSL (445, 777)        • Nginx (80 / 443 / 8443)
    • SSH WebSocket via Nginx        • OpenVPN (TCP 1194 / UDP 2200)
-   • Xray VMess/VLess/Trojan/SS    • Trojan-Go (2087)
+   • Xray VMess/VLess/Trojan/SS    • Trojan-Go (2098)
    • Hysteria 2 (UDP 36712 + range) • BadVPN UDPGW (7100/7200/7300)
    • WireGuard (UDP 51820)         • SlowDNS (53 → 5300)
-   • OHP (8080) opsional
+   • OHP (8081) opsional
 
   ${DIM}Path config:${NC}
    • /etc/maxpanel/        : panel data + user DB
@@ -4270,7 +4792,9 @@ main_menu() {
         echo -e "  ${A1}${_DASH}${NC}"
         _r2 "${A2}" "[13] ℹ️  About              " "${A4}" "[14] 🚀  Install Ulang"
         echo -e "  ${A1}${_DASH}${NC}"
-        _r2 "${LR}" "[E]  🗑  Uninstall          " "${LR}" "[X]  ✗   Keluar"
+        _r2 "${A2}" "[C]  🔎  Cek Semua Proxy    " "${LR}" "[E]  🗑  Uninstall"
+        echo -e "  ${A1}${_DASH}${NC}"
+        _r2 "${LR}" "[X]  ✗   Keluar             " "${DIM}" "                       "
         echo -e "  ${A1}${_DASH}${NC}"
         echo -e "  ${DIM}                   ✦  MAX PANEL v${SCRIPT_VERSION}  ✦                ${NC}"
         echo ""
@@ -4290,6 +4814,7 @@ main_menu() {
             12) cek_update ;;
             13) menu_about ;;
             14) do_install_all ;;
+            c)  cek_all_proxy ;;
             e)  do_uninstall ;;
             x|0)
                 echo -e "\n  ${IT}${AL}Sampai jumpa! — MAX PANEL${NC}\n"
@@ -4460,6 +4985,16 @@ handle_cli_flags() {
             # Rotate: simpan max 10 backup
             ls -1t "$BACKUPDIR"/max-backup-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
             echo "[$(date)] auto-backup: $out"
+            # Auto-upload ke Telegram (kalau bot di-setup)
+            if [[ -f "$BOTF" && -s "$out" ]]; then
+                local sz hn
+                sz=$(du -sh "$out" | cut -f1); hn=$(hostname)
+                _tg_send "💾 <b>Auto-Backup Mingguan</b>
+🖥 Host : <code>${hn}</code>
+📁 File : <code>$(basename "$out")</code>
+📦 Size : <code>${sz}</code>"
+                _tg_send_doc "$out" "📦 Auto-Backup MAX PANEL — ${hn} — $(basename "$out")"
+            fi
             exit 0
             ;;
         --check-update)
