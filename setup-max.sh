@@ -119,8 +119,8 @@ XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-
 HYSTERIA_URL="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64"
 TROJAN_GO_URL="https://github.com/p4gefau1t/trojan-go/releases/latest/download/trojan-go-linux-amd64.zip"
 UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
-SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
-OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
+SLOWDNS_URL="https://raw.githubusercontent.com/chanelog/max/main/sldns-server"
+OHP_URL="https://raw.githubusercontent.com/chanelog/max/main/ohpserver"
 
 SCRIPT_VERSION="1.2"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
