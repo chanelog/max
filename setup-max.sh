@@ -369,15 +369,400 @@ del_maxlogin() {
 
 # ════════════════════════════════════════════════════════════
 #  TELEGRAM HELPER
+# ────────────────────────────────────────────────────────────
+#  _tg_load        → source bot.conf → set $BOT_TOKEN, $CHAT_ID; return 0 jika siap.
+#  _tg_send <html> → kirim pesan HTML (auto split kalau >4000 char).
+#  _tg_send_doc <file> [caption_html] [filename] → kirim file/dokumen (max 50MB).
+#  _tg_esc <text>  → escape karakter HTML khusus (& < >) untuk parse_mode=HTML.
+#  _tg_pre  <text> → wrap di <pre>...</pre>, escape isi (untuk link config panjang).
+#  _tg_get_file <file_id> <out_path> → download file dari Telegram (untuk restore).
+#  TG_BACKUPDB     → simpan riwayat backup ber-file_id (1 baris = ts|name|size|file_id).
 # ════════════════════════════════════════════════════════════
-_tg_send() {
-    [[ ! -f "$BOTF" ]] && return
+TG_BACKUPDB="$DIR/tg-backups.db"
+
+_tg_load() {
+    [[ ! -f "$BOTF" ]] && return 1
     # shellcheck disable=SC1090
     source "$BOTF" 2>/dev/null
+    [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]]
+}
+
+_tg_esc() {
+    # Escape & < > untuk parse_mode=HTML (Telegram safe)
+    local s="$1"
+    s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"
+    printf '%s' "$s"
+}
+
+_tg_pre() {
+    # Wrap di <pre> dengan escape isi (untuk URL/config panjang)
+    printf '<pre>%s</pre>' "$(_tg_esc "$1")"
+}
+
+_tg_send() {
+    _tg_load || return 0
     local msg="$1"
-    [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]] && \
-        curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" -d "text=${msg}" -d "parse_mode=HTML" &>/dev/null
+    # Telegram limit 4096 char/pesan. Split aman di newline.
+    local max=3800
+    if [[ ${#msg} -le $max ]]; then
+        curl -s --max-time 15 -X POST \
+            "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${msg}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" &>/dev/null
+        return 0
+    fi
+    # Split per blok ~3800 char di batas newline
+    local part="" line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ ${#part} -gt 0 && $(( ${#part} + ${#line} + 1 )) -gt $max ]]; then
+            curl -s --max-time 15 -X POST \
+                "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${CHAT_ID}" \
+                --data-urlencode "text=${part}" \
+                -d "parse_mode=HTML" \
+                -d "disable_web_page_preview=true" &>/dev/null
+            part="$line"
+        else
+            [[ -n "$part" ]] && part+=$'\n'
+            part+="$line"
+        fi
+    done <<< "$msg"
+    if [[ -n "$part" ]]; then
+        curl -s --max-time 15 -X POST \
+            "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${part}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" &>/dev/null
+    fi
+}
+
+# Kirim file sebagai dokumen (max 50MB)
+# return 0 + echo file_id ke stdout kalau sukses; return 1 kalau gagal
+_tg_send_doc() {
+    _tg_load || return 1
+    local fpath="$1" caption="${2:-}" fname="${3:-}"
+    [[ ! -f "$fpath" ]] && return 1
+    local sz; sz=$(stat -c%s "$fpath" 2>/dev/null || echo 0)
+    # Telegram bot API limit 50MB
+    if [[ "$sz" -gt 52428800 ]]; then
+        return 2  # too large
+    fi
+    local args=( -s --max-time 120
+                 -F "chat_id=${CHAT_ID}"
+                 -F "parse_mode=HTML" )
+    [[ -n "$caption" ]] && args+=( -F "caption=${caption}" )
+    if [[ -n "$fname" ]]; then
+        args+=( -F "document=@${fpath};filename=${fname}" )
+    else
+        args+=( -F "document=@${fpath}" )
+    fi
+    local resp
+    resp=$(curl "${args[@]}" "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" 2>/dev/null)
+    [[ -z "$resp" ]] && return 1
+    if ! echo "$resp" | grep -q '"ok":true'; then
+        return 1
+    fi
+    # Ekstrak file_id dari response (terambil yang terbesar = original)
+    local fid
+    fid=$(echo "$resp" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    doc=d.get("result",{}).get("document",{})
+    print(doc.get("file_id",""))
+except Exception:
+    pass
+' 2>/dev/null)
+    [[ -n "$fid" ]] && printf '%s' "$fid"
+    return 0
+}
+
+# Download file dari Telegram → simpan ke $2
+_tg_get_file() {
+    _tg_load || return 1
+    local fid="$1" out="$2"
+    [[ -z "$fid" || -z "$out" ]] && return 1
+    local resp path
+    resp=$(curl -s --max-time 30 \
+        "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fid}")
+    path=$(echo "$resp" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(d.get("result",{}).get("file_path",""))
+except Exception:
+    pass
+' 2>/dev/null)
+    [[ -z "$path" ]] && return 1
+    curl -s --max-time 600 -o "$out" \
+        "https://api.telegram.org/file/bot${BOT_TOKEN}/${path}"
+    [[ -s "$out" ]] || return 1
+    return 0
+}
+
+# Catat backup di TG_BACKUPDB. Format: timestamp|filename|size_bytes|file_id
+_tg_backup_record() {
+    local fname="$1" sz="$2" fid="$3"
+    [[ -z "$fid" ]] && return 0
+    mkdir -p "$DIR"
+    touch "$TG_BACKUPDB"
+    echo "$(date +%s)|${fname}|${sz}|${fid}" >> "$TG_BACKUPDB"
+}
+
+# ════════════════════════════════════════════════════════════
+#  TELEGRAM RENDERER — detail akun (mirror tampilan show_box_*)
+# ════════════════════════════════════════════════════════════
+_tg_brand() {
+    local b="MAX PANEL"
+    if [[ -f "$STRF" ]]; then
+        # shellcheck disable=SC1090
+        source "$STRF" 2>/dev/null
+        b="${BRAND:-MAX PANEL}"
+    fi
+    _tg_esc "$b"
+}
+
+# SSH detail (sama persis dengan show_box_ssh)
+_tg_render_ssh() {
+    local u="$1" p="$2" exp="$3" maxl="${4:-2}" title="${5:-Akun SSH/OpenSSH}"
+    local ip dom brand
+    ip=$(get_ip); dom=$(get_domain); brand=$(_tg_brand)
+    cat <<EOF
+✅ <b>${title} — ${brand}</b>
+────────────────────────────────────
+👤 <b>Username</b> : <code>$(_tg_esc "$u")</code>
+🔑 <b>Password</b> : <code>$(_tg_esc "$p")</code>
+────────────────────────────────────
+🖥 <b>IP Publik</b> : <code>$(_tg_esc "$ip")</code>
+🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
+🔌 <b>Port SSH</b> : <code>22</code>
+🔌 <b>Dropbear</b> : <code>109, 143</code>
+🔒 <b>SSL/Stun.</b>: <code>445, 777</code>
+🔌 <b>WS HTTP</b>  : <code>80 (/ws-ssh)</code>
+🔒 <b>WS HTTPS</b> : <code>443 (/ws-ssh)</code>
+📡 <b>OpenVPN</b>  : <code>TCP 1194 / UDP 2200</code>
+📡 <b>UDPGW</b>    : <code>7100, 7200, 7300</code>
+────────────────────────────────────
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+EOF
+}
+
+# VMess detail + 2 link (TLS + HTTP)
+_tg_render_vmess() {
+    local u="$1" uuid="$2" exp="$3" maxl="${4:-2}"
+    local dom ip brand
+    dom=$(get_domain); ip=$(get_ip); brand=$(_tg_brand)
+    local link_tls link_http
+    link_tls=$(printf '%s' "{\"v\":\"2\",\"ps\":\"${u}-TLS\",\"add\":\"${dom}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${dom}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${dom}\"}" | base64 -w0)
+    link_http=$(printf '%s' "{\"v\":\"2\",\"ps\":\"${u}-HTTP\",\"add\":\"${dom}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${dom}\",\"path\":\"/vmess\",\"tls\":\"none\"}" | base64 -w0)
+    cat <<EOF
+✅ <b>Akun VMess — ${brand}</b>
+────────────────────────────────────
+👤 <b>Remark</b>   : <code>$(_tg_esc "$u")</code>
+🔑 <b>UUID</b>     : <code>${uuid}</code>
+🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
+🖥 <b>IP</b>       : <code>$(_tg_esc "$ip")</code>
+🔌 <b>Port TLS</b> : <code>443 (WS)</code>
+🔌 <b>Port HTTP</b>: <code>80 (WS)</code>
+🛣 <b>Path</b>     : <code>/vmess</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+🔗 <b>Link VMess TLS</b>:
+<code>vmess://${link_tls}</code>
+
+🔗 <b>Link VMess HTTP</b>:
+<code>vmess://${link_http}</code>
+EOF
+}
+
+# VLess detail + 4 link (WS-TLS, WS-HTTP, gRPC-TLS, gRPC-ALT)
+_tg_render_vless() {
+    local u="$1" uuid="$2" exp="$3" maxl="${4:-2}"
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    local L1 L2 L3 L4
+    L1="vless://${uuid}@${dom}:443?path=/vless&security=tls&encryption=none&host=${dom}&type=ws&sni=${dom}#${u}-TLS"
+    L2="vless://${uuid}@${dom}:80?path=/vless&encryption=none&host=${dom}&type=ws#${u}-HTTP"
+    L3="vless://${uuid}@${dom}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC"
+    L4="vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-ALT"
+    cat <<EOF
+✅ <b>Akun VLess — ${brand}</b>
+────────────────────────────────────
+👤 <b>Remark</b>   : <code>$(_tg_esc "$u")</code>
+🔑 <b>UUID</b>     : <code>${uuid}</code>
+🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
+🔌 <b>Port TLS</b> : <code>443 (WS)</code>
+🔌 <b>Port HTTP</b>: <code>80 (WS)</code>
+🔌 <b>gRPC TLS</b> : <code>443, 8443</code>
+🛣 <b>WS Path</b>  : <code>/vless</code>
+🛣 <b>gRPC SVC</b> : <code>vless-grpc</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+🔗 <b>VLess WS TLS</b>:
+<code>$(_tg_esc "$L1")</code>
+
+🔗 <b>VLess WS HTTP</b>:
+<code>$(_tg_esc "$L2")</code>
+
+🔗 <b>VLess gRPC TLS</b>:
+<code>$(_tg_esc "$L3")</code>
+
+🔗 <b>VLess gRPC ALT (8443)</b>:
+<code>$(_tg_esc "$L4")</code>
+EOF
+}
+
+# Trojan (Xray) detail + link WS-TLS + gRPC-TLS + ALT
+_tg_render_trojan() {
+    local u="$1" pw="$2" exp="$3" maxl="${4:-2}"
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    local L1 L2 L3
+    L1="trojan://${pw}@${dom}:443?path=/trojan-ws&security=tls&host=${dom}&type=ws&sni=${dom}#${u}-WS"
+    L2="trojan://${pw}@${dom}:443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC"
+    L3="trojan://${pw}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-ALT"
+    cat <<EOF
+✅ <b>Akun Trojan — ${brand}</b>
+────────────────────────────────────
+👤 <b>Remark</b>   : <code>$(_tg_esc "$u")</code>
+🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
+🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
+🔌 <b>Port TLS</b> : <code>443 (WS)</code>
+🔌 <b>gRPC TLS</b> : <code>443, 8443</code>
+🛣 <b>WS Path</b>  : <code>/trojan-ws</code>
+🛣 <b>gRPC SVC</b> : <code>trojan-grpc</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+🔗 <b>Trojan WS TLS</b>:
+<code>$(_tg_esc "$L1")</code>
+
+🔗 <b>Trojan gRPC TLS</b>:
+<code>$(_tg_esc "$L2")</code>
+
+🔗 <b>Trojan gRPC ALT (8443)</b>:
+<code>$(_tg_esc "$L3")</code>
+EOF
+}
+
+# Shadowsocks detail + ss:// link
+_tg_render_ss() {
+    local u="$1" pw="$2" exp="$3" maxl="${4:-2}"
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    local b64; b64=$(printf '%s' "aes-128-gcm:${pw}@${dom}:8388" | base64 -w0)
+    cat <<EOF
+✅ <b>Akun Shadowsocks — ${brand}</b>
+────────────────────────────────────
+👤 <b>Username</b> : <code>$(_tg_esc "$u")</code>
+🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
+🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
+🔌 <b>Port</b>     : <code>8388</code>
+🔐 <b>Method</b>   : <code>aes-128-gcm</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+🔗 <b>Link SS</b>:
+<code>ss://${b64}#$(_tg_esc "$u")</code>
+EOF
+}
+
+# Trojan-Go detail + link
+_tg_render_tgo() {
+    local u="$1" pw="$2" exp="$3" maxl="${4:-2}"
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    local L="trojan-go://${pw}@${dom}:2087?sni=${dom}&type=ws&path=%2Ftrojan-go#${u}"
+    cat <<EOF
+✅ <b>Akun Trojan-Go — ${brand}</b>
+────────────────────────────────────
+👤 <b>Username</b> : <code>$(_tg_esc "$u")</code>
+🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
+🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
+🔌 <b>Port</b>     : <code>2087</code>
+🛣 <b>Path</b>     : <code>/trojan-go</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+🔗 <b>Link Trojan-Go</b>:
+<code>$(_tg_esc "$L")</code>
+EOF
+}
+
+# Hysteria 2 detail + link
+_tg_render_hy() {
+    local u="$1" pw="$2" exp="$3" maxl="${4:-2}"
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    local L="hy2://${u}:${pw}@${dom}:36712?insecure=1&sni=${dom}#${u}"
+    cat <<EOF
+✅ <b>Akun Hysteria 2 — ${brand}</b>
+────────────────────────────────────
+👤 <b>Username</b> : <code>$(_tg_esc "$u")</code>
+🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
+🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
+🔌 <b>Port</b>     : <code>36712 (UDP)</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+🔗 <b>Link Hysteria 2</b>:
+<code>$(_tg_esc "$L")</code>
+EOF
+}
+
+# OpenVPN detail (config dikirim sebagai dokumen terpisah)
+_tg_render_ovpn() {
+    local u="$1" pw="$2" exp="$3" maxl="${4:-2}"
+    local ip brand; ip=$(get_ip); brand=$(_tg_brand)
+    cat <<EOF
+✅ <b>Akun OpenVPN — ${brand}</b>
+────────────────────────────────────
+👤 <b>Username</b> : <code>$(_tg_esc "$u")</code>
+🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
+🖥 <b>IP Server</b>: <code>$(_tg_esc "$ip")</code>
+🔌 <b>TCP</b>      : <code>1194</code>
+🔌 <b>UDP</b>      : <code>2200</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+📎 File config <b>.ovpn</b> dikirim terpisah (TCP & UDP)
+EOF
+}
+
+# WireGuard detail
+_tg_render_wg() {
+    local u="$1" ip="$2" pubk="$3" exp="$4" maxl="${5:-2}"
+    local srv brand; srv=$(get_domain); brand=$(_tg_brand)
+    cat <<EOF
+✅ <b>Peer WireGuard — ${brand}</b>
+────────────────────────────────────
+👤 <b>Name</b>     : <code>$(_tg_esc "$u")</code>
+🌐 <b>IP Peer</b>  : <code>$(_tg_esc "$ip")</code>
+🔑 <b>PubKey</b>   : <code>$(_tg_esc "$pubk")</code>
+🔌 <b>Endpoint</b> : <code>$(_tg_esc "$srv"):51820</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+────────────────────────────────────
+📎 File <b>.conf</b> dikirim terpisah (langsung import ke app WireGuard)
+EOF
+}
+
+# SlowDNS detail
+_tg_render_slow() {
+    local u="$1" pw="$2" exp="$3" maxl="${4:-2}" pub="${5:-}"
+    local dom brand; dom=$(get_domain); brand=$(_tg_brand)
+    cat <<EOF
+✅ <b>Akun SlowDNS — ${brand}</b>
+────────────────────────────────────
+👤 <b>Username</b> : <code>$(_tg_esc "$u")</code>
+🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
+🌐 <b>NS Domain</b>: <code>$(_tg_esc "$dom")</code>
+🔌 <b>Port</b>     : <code>53 (UDP), 5300</code>
+🔑 <b>PubKey</b>   : <code>$(_tg_esc "$pub")</code>
+🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
+📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
+EOF
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1460,14 +1845,14 @@ install_nginx() {
     # Semua path Xray + WS-SSH dirutekan dari sini. SSH/Dropbear/Stunnel TIDAK pakai 80/443.
     #
     # Xray inbound mapping (semua 127.0.0.1):
-    #   /vmess       \u2192 10001  (VMess WS)
-    #   /vless       \u2192 10002  (VLess WS)
-    #   /trojan-ws   \u2192 10003  (Trojan WS)
-    #   /vless-grpc  \u2192 10004  (VLess gRPC)  \u2014 hanya di server TLS
-    #   /trojan-grpc \u2192 10005  (Trojan gRPC) \u2014 hanya di server TLS
-    #   /ws-ssh      \u2192 8880   (SSH-over-WS via python proxy)
+    #   /vmess       → 10001  (VMess WS)
+    #   /vless       → 10002  (VLess WS)
+    #   /trojan-ws   → 10003  (Trojan WS)
+    #   /vless-grpc  → 10004  (VLess gRPC)  — hanya di server TLS
+    #   /trojan-grpc → 10005  (Trojan gRPC) — hanya di server TLS
+    #   /ws-ssh      → 8880   (SSH-over-WS via python proxy)
     cat > /etc/nginx/conf.d/xray.conf <<NGX
-# MAX PANEL \u2014 Xray reverse-proxy (HTTP 80 + TLS 443 + alt-TLS 8443)
+# MAX PANEL — Xray reverse-proxy (HTTP 80 + TLS 443 + alt-TLS 8443)
 # === SHARED PROXY HEADERS ===========================================
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
 
@@ -1512,7 +1897,7 @@ server {
         proxy_read_timeout 300s;
     }
 
-    # SSH-over-WebSocket (Nginx \u2192 python WS proxy \u2192 SSH:22 / Dropbear:109)
+    # SSH-over-WebSocket (Nginx → python WS proxy → SSH:22 / Dropbear:109)
     location = /ws-ssh {
         proxy_redirect off;
         proxy_pass http://127.0.0.1:8880;
@@ -1624,7 +2009,7 @@ NGX
         systemctl restart nginx 2>/dev/null
         is_up nginx && ok "Nginx aktif (80 HTTP + 443/8443 TLS)" || warn "Nginx belum aktif"
     else
-        err "Konfigurasi Nginx INVALID \u2014 cek: nginx -t"
+        err "Konfigurasi Nginx INVALID — cek: nginx -t"
         nginx -t 2>&1 | tail -10 | while read -r ln; do warn "  $ln"; done
     fi
 }
@@ -1853,11 +2238,7 @@ ssh_add() {
 
     show_box_ssh "$u" "$p" "$exp" "$ml"
 
-    _tg_send "✅ <b>Akun SSH Baru — MAX</b>
-👤 User: <code>${u}</code>
-🔑 Pass: <code>${p}</code>
-📅 Exp : ${exp}
-🔒 ML  : ${ml}"
+    _tg_send "$(_tg_render_ssh "$u" "$p" "$exp" "$ml" "Akun SSH/OpenSSH")"
 
     pause
 }
@@ -1873,7 +2254,10 @@ ssh_trial() {
     echo -e "${p}\n${p}" | passwd "$u" &>/dev/null
     chage -E "$(date -d '+1 day' +%Y-%m-%d)" "$u" 2>/dev/null
 
-    echo "${u}|${p}|TRIAL-$(date +%s)|1" >> "$SSH_DB"
+    # FIX: simpan tanggal ISO (besok) di kolom expired, bukan "TRIAL-<ts>" \u2014
+    # supaya is_expired/awk parse tanggal di cron auto-clean berfungsi normal.
+    local trial_exp; trial_exp=$(TZ="Asia/Jakarta" date -d "+1 day" +"%Y-%m-%d")
+    echo "${u}|${p}|${trial_exp}|1" >> "$SSH_DB"
     set_maxlogin "$u" "1"
 
     # Schedule auto-delete 1 jam (atrun atau cron)
@@ -1889,6 +2273,7 @@ ssh_trial() {
     fi
 
     show_box_ssh "$u" "$p" "Trial 1 jam" "1"
+    _tg_send "$(_tg_render_ssh "$u" "$p" "Trial 1 jam" "1" "Akun SSH Trial 1 Jam")"
     pause
 }
 
@@ -2059,7 +2444,7 @@ def ss_clients():
     for u in parse_users(os.path.join(DIR,"ss-users.db")):
         out.append({"password": u[1], "method":"aes-128-gcm", "email": u[0]})
     return out
-# VLess (single WS inbound + single gRPC inbound \u2014 TLS dipisah ke Nginx)
+# VLess (single WS inbound + single gRPC inbound — TLS dipisah ke Nginx)
 for tag in ("vless-ws","vless-grpc"):
     set_inbound(tag, vless_clients())
 # VMess (single WS inbound)
@@ -2120,10 +2505,7 @@ vmess_add() {
     echo -e "  ${LG}vmess://${vmess_ntls}${NC}"
     echo ""
 
-    _tg_send "✅ <b>VMess Baru — MAX</b>
-👤 <code>${u}</code>
-🔑 <code>${uuid}</code>
-📅 ${exp} | 🔒 ${ml} dev"
+    _tg_send "$(_tg_render_vmess "$u" "$uuid" "$exp" "$ml")"
 
     pause
 }
@@ -2134,11 +2516,13 @@ vmess_trial() {
     local u="trial-vmess-$(date +%s | tail -c 5)"
     local uuid; uuid=$(rand_uuid)
     local exp; exp=$(mk_exp 1)
-    echo "${u}|${uuid}|TRIAL|${exp}|1" >> "$VMESS_DB"
+    # FIX: 4 kolom (user|uuid|exp|maxlogin), bukan 5
+    echo "${u}|${uuid}|${exp}|1" >> "$VMESS_DB"
     set_maxlogin "$u" "1"
     _xray_sync_clients
 
     show_box_xray "VMess" "$u" "$uuid" "Trial 1 jam" "1"
+    _tg_send "$(_tg_render_vmess "$u" "$uuid" "Trial 1 jam (exp ${exp})" "1")"
 
     # Auto-delete 1 jam
     local cron_id="trial-vmess-$(date +%s)"
@@ -2222,8 +2606,7 @@ vless_add() {
     echo -e "  ${DIM}🔗 Link VLess gRPC alt-TLS (port 8443):${NC}"
     echo -e "  ${DIM}vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
-    _tg_send "✅ <b>VLess Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${uuid}</code>  📅 ${exp}"
+    _tg_send "$(_tg_render_vless "$u" "$uuid" "$exp" "$ml")"
     pause
 }
 
@@ -2236,6 +2619,7 @@ vless_trial() {
     set_maxlogin "$u" "1"
     _xray_sync_clients
     show_box_xray "VLess" "$u" "$uuid" "Trial 1 jam" "1"
+    _tg_send "$(_tg_render_vless "$u" "$uuid" "Trial 1 jam" "1")"
     local cron_id="trial-vless-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${VLESS_DB}; /usr/local/bin/max-menu --sync-xray; rm -f /etc/cron.d/${cron_id}" \
@@ -2307,8 +2691,7 @@ trojan_add() {
     echo -e "  ${DIM}🔗 Link Trojan gRPC alt-TLS (port 8443):${NC}"
     echo -e "  ${DIM}trojan://${p}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
     echo ""
-    _tg_send "✅ <b>Trojan Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>  📅 ${exp}"
+    _tg_send "$(_tg_render_trojan "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2320,6 +2703,7 @@ trojan_trial() {
     echo "${u}|${p}|$(mk_exp 1)|1" >> "$TROJAN_DB"
     set_maxlogin "$u" "1"; _xray_sync_clients
     show_box_xray "Trojan" "$u" "$p" "Trial 1 jam" "1"
+    _tg_send "$(_tg_render_trojan "$u" "$p" "Trial 1 jam" "1")"
     local cron_id="trial-trojan-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${TROJAN_DB}; /usr/local/bin/max-menu --sync-xray; rm -f /etc/cron.d/${cron_id}" \
@@ -2454,6 +2838,7 @@ ss_add() {
     echo -e "  ${DIM}🔗 Link SS :${NC}"
     echo -e "  ${LG}ss://${link}#${u}${NC}"
     echo ""
+    _tg_send "$(_tg_render_ss "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2533,8 +2918,7 @@ tgo_add() {
     echo -e "  ${DIM}🔗 Link Trojan-Go:${NC}"
     echo -e "  ${LG}trojan-go://${p}@${dom}:2087?sni=${dom}&type=ws&path=%2Ftrojan-go#${u}${NC}"
     echo ""
-    _tg_send "✅ <b>Trojan-Go Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send "$(_tg_render_tgo "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2545,6 +2929,7 @@ tgo_trial() {
     echo "${u}|${p}|$(mk_exp 1)|1" >> "$TROJANGO_DB"
     set_maxlogin "$u" "1"; _trojango_sync
     ok "Trial Trojan-Go: ${W}${u}${NC} / ${A3}${p}${NC}"
+    _tg_send "$(_tg_render_tgo "$u" "$p" "Trial 1 jam" "1")"
     local cron_id="trial-tgo-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${TROJANGO_DB}; systemctl restart trojan-go; rm -f /etc/cron.d/${cron_id}" \
@@ -2663,8 +3048,7 @@ hy_add() {
     echo -e "  ${DIM}🔗 Link Hysteria 2:${NC}"
     echo -e "  ${LG}hy2://${u}:${p}@${dom}:36712?insecure=1&sni=${dom}#${u}${NC}"
     echo ""
-    _tg_send "✅ <b>Hysteria Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send "$(_tg_render_hy "$u" "$p" "$exp" "$ml")"
     pause
 }
 
@@ -2675,6 +3059,7 @@ hy_trial() {
     echo "${u}|${p}|$(mk_exp 1)|1" >> "$HY_DB"
     set_maxlogin "$u" "1"; _hy_sync
     ok "Trial: ${W}${u}${NC} / ${A3}${p}${NC}"
+    _tg_send "$(_tg_render_hy "$u" "$p" "Trial 1 jam" "1")"
     local cron_id="trial-hy-$(date +%s)"
     local t; t=$(TZ="Asia/Jakarta" date -d "+1 hour" "+%M %H %d %m")
     echo "$t * root sed -i '/^${u}|/d' ${HY_DB}; systemctl restart hysteria-server; rm -f /etc/cron.d/${cron_id}" \
@@ -2759,8 +3144,22 @@ ovpn_add() {
     printf  "  ${A1}│${NC} 📄 ${DIM}Config UDP${NC}: ${W}/etc/openvpn/client/%s/%s-udp.ovpn${NC}\n" "$u" "$u"
     echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
     echo ""
-    _tg_send "✅ <b>OpenVPN Baru — MAX</b>
-👤 <code>${u}</code>  🔑 <code>${p}</code>"
+    _tg_send "$(_tg_render_ovpn "$u" "$p" "$exp" "$ml")"
+    # Kirim file .ovpn (TCP & UDP) sebagai dokumen — tinggal download di Telegram
+    if _tg_load; then
+        local tcp_f="/etc/openvpn/client/${u}/${u}-tcp.ovpn"
+        local udp_f="/etc/openvpn/client/${u}/${u}-udp.ovpn"
+        if [[ -s "$tcp_f" ]]; then
+            _tg_send_doc "$tcp_f" "📎 Config OpenVPN TCP — <code>$(_tg_esc "$u")</code>" "${u}-tcp.ovpn" >/dev/null \
+                && ok "Config TCP terkirim ke Telegram" \
+                || warn "Gagal kirim config TCP ke Telegram"
+        fi
+        if [[ -s "$udp_f" ]]; then
+            _tg_send_doc "$udp_f" "📎 Config OpenVPN UDP — <code>$(_tg_esc "$u")</code>" "${u}-udp.ovpn" >/dev/null \
+                && ok "Config UDP terkirim ke Telegram" \
+                || warn "Gagal kirim config UDP ke Telegram"
+        fi
+    fi
     pause
 }
 
@@ -2800,7 +3199,9 @@ ovpn_trial() {
     useradd -s /bin/false -M "$u" 2>/dev/null
     echo -e "${p}\n${p}" | passwd "$u" &>/dev/null
     chage -E "$(date -d '+1 day' +%Y-%m-%d)" "$u" 2>/dev/null
-    echo "${u}|${p}|TRIAL|1" >> "$OVPN_DB"
+    # FIX: simpan tanggal ISO supaya cron auto-clean berfungsi
+    local trial_exp; trial_exp=$(TZ="Asia/Jakarta" date -d "+1 day" +"%Y-%m-%d")
+    echo "${u}|${p}|${trial_exp}|1" >> "$OVPN_DB"
     set_maxlogin "$u" "1"
     ok "Trial OpenVPN: ${W}${u}${NC} / ${A3}${p}${NC}"
     local cron_id="trial-ovpn-$(date +%s)"
@@ -2949,8 +3350,13 @@ WGCLI
         qrencode -t ANSIUTF8 < "$cfile"
         echo ""
     fi
-    _tg_send "✅ <b>WireGuard Peer — MAX</b>
-👤 <code>${u}</code>  📡 <code>${ip}</code>"
+    _tg_send "$(_tg_render_wg "$u" "$ip" "$pubk" "$exp" "$ml")"
+    # Kirim .conf sebagai dokumen — langsung import ke app WireGuard / Tunnel
+    if _tg_load && [[ -s "$cfile" ]]; then
+        _tg_send_doc "$cfile" "📎 Config WireGuard — <code>$(_tg_esc "$u")</code>" "${u}.conf" >/dev/null \
+            && ok "Config WG terkirim ke Telegram" \
+            || warn "Gagal kirim config WG ke Telegram"
+    fi
     pause
 }
 
@@ -3059,6 +3465,7 @@ slow_add() {
     printf  "  ${A1}│${NC} 📅 ${DIM}Expired ${NC} : ${Y}%s${NC}\n" "$exp"
     echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
     echo ""
+    _tg_send "$(_tg_render_slow "$u" "$p" "$exp" "$ml" "$pub")"
     pause
 }
 
@@ -3113,7 +3520,7 @@ check_maxlogin_all() {
         active=$(ps -eo user,cmd --no-headers 2>/dev/null \
                  | awk -v u="$uname" '$2 == "sshd:" && $3 ~ ("^" u "@") {c++} END{print c+0}')
         if [[ "$active" -gt "$maxdev" ]]; then
-            # FIX: ambil PID dari ps -eo pid,cmd \u2014 cmd-token pertama adalah $2 ("sshd:"),
+            # FIX: ambil PID dari ps -eo pid,cmd — cmd-token pertama adalah $2 ("sshd:"),
             # username pada token $3 dengan format <user>@<tty>.
             local pids
             mapfile -t pids < <(ps -eo pid,cmd --no-headers 2>/dev/null \
@@ -3563,12 +3970,35 @@ do_backup() {
     [[ -d /etc/nginx/conf.d ]] && files+=("/etc/nginx/conf.d")
 
     if tar -czPf "$out" "${files[@]}" 2>/dev/null; then
-        local sz; sz=$(du -sh "$out" | cut -f1)
-        ok "Backup: ${W}$(basename "$out")${NC} (${Y}${sz}${NC})"
+        local sz_h sz_b
+        sz_h=$(du -sh "$out" | cut -f1)
+        sz_b=$(stat -c%s "$out" 2>/dev/null || echo 0)
+        ok "Backup: ${W}$(basename "$out")${NC} (${Y}${sz_h}${NC})"
         ok "Path : ${A3}${out}${NC}"
-        _tg_send "💾 <b>Backup Berhasil — MAX</b>
-📁 <code>$(basename "$out")</code>
-📦 Size: ${sz}"
+
+        local fname; fname=$(basename "$out")
+        # Kirim ke Telegram (dokumen) bila bot ter-setup & ukuran <= 50 MB
+        if _tg_load; then
+            local caption
+            printf -v caption '%s\n%s\n%s\n%s' \
+                "💾 <b>Backup MAX PANEL</b>" \
+                "📁 <code>${fname}</code>" \
+                "📦 ${sz_h}" \
+                "📅 $(date '+%d/%m/%Y %H:%M:%S')"
+            local fid rc
+            fid=$(_tg_send_doc "$out" "$(printf '%b' "$caption")" "$fname")
+            rc=$?
+            if [[ "$rc" == "0" && -n "$fid" ]]; then
+                _tg_backup_record "$fname" "$sz_b" "$fid"
+                ok "Backup terkirim ke Telegram (file_id tersimpan)"
+            elif [[ "$rc" == "2" ]]; then
+                warn "Backup > 50MB — lewati upload ke Telegram (limit Bot API). File tetap tersimpan lokal."
+                _tg_send "$(printf '%s\n%s\n%s' "💾 <b>Backup Berhasil — MAX</b>" "📁 <code>${fname}</code>" "📦 ${sz_h} (terlalu besar untuk Telegram, simpan lokal)")"
+            else
+                warn "Gagal kirim backup ke Telegram — simpan lokal saja"
+                _tg_send "$(printf '%s\n%s\n%s' "💾 <b>Backup Berhasil — MAX</b>" "📁 <code>${fname}</code>" "📦 ${sz_h} (gagal upload ke TG)")"
+            fi
+        fi
     else
         err "Backup gagal!"
     fi
@@ -3602,6 +4032,91 @@ do_restore() {
     tar -xzPf "$f" -C / && ok "Restore selesai" || err "Restore gagal!"
     systemctl daemon-reload
     tool_restart_all >/dev/null 2>&1
+    pause
+}
+
+# ════════════════════════════════════════════════════════════
+#  RESTORE FROM TELEGRAM — ambil file backup yang pernah dikirim
+# ────────────────────────────────────────────────────────────
+#  Panel menyimpan file_id setiap upload backup di TG_BACKUPDB.
+#  User pilih nomor → panel `getFile` → download → restore.
+# ════════════════════════════════════════════════════════════
+do_restore_tg() {
+    show_header
+    _top; _btn "  ${IT}${AL}☁️   RESTORE DARI TELEGRAM${NC}"; _bot; echo ""
+
+    if ! _tg_load; then
+        err "Bot Telegram belum di-setup. Buka Pengaturan → Setup Telegram Bot."
+        pause; return
+    fi
+    if [[ ! -s "$TG_BACKUPDB" ]]; then
+        warn "Belum ada riwayat backup di Telegram."
+        echo -e "  ${DIM}Buat backup dulu via menu ‘Backup Sekarang’ — panel akan upload ke bot otomatis.${NC}"
+        pause; return
+    fi
+
+    # Tampilkan list (dari terbaru)
+    echo -e "  ${BLD}${A3}List backup yang tersedia di bot Telegram:${NC}"
+    _sep
+    local lines=() i=0
+    # Read terbalik (terbaru di atas)
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        lines+=("$line")
+    done < <(tac "$TG_BACKUPDB" 2>/dev/null || tail -r "$TG_BACKUPDB" 2>/dev/null)
+
+    for line in "${lines[@]}"; do
+        i=$((i+1))
+        local ts fname sz fid hsz hdate
+        IFS='|' read -r ts fname sz fid <<< "$line"
+        hsz=$(numfmt --to=iec --suffix=B "${sz:-0}" 2>/dev/null || echo "${sz}B")
+        hdate=$(date -d "@${ts}" '+%d/%m/%Y %H:%M' 2>/dev/null || echo "?")
+        printf "  ${A2}[%d]${NC} ${W}%-40s${NC} ${Y}%-10s${NC} ${DIM}%s${NC}\n" \
+            "$i" "$fname" "$hsz" "$hdate"
+        [[ "$i" -ge 30 ]] && break
+    done
+    _sep
+    echo ""
+    echo -ne "  ${A3}Nomor backup${NC} (0=batal): "; read -r n
+    [[ ! "$n" =~ ^[0-9]+$ || "$n" -eq 0 ]] && { inf "Dibatalkan"; pause; return; }
+    [[ "$n" -lt 1 || "$n" -gt ${#lines[@]} ]] && { err "Nomor invalid"; pause; return; }
+
+    local sel="${lines[$((n-1))]}"
+    local ts fname sz fid
+    IFS='|' read -r ts fname sz fid <<< "$sel"
+
+    warn "Restore akan menimpa konfigurasi saat ini!"
+    echo -ne "  ${A3}Ketik ${LR}YES${A3} untuk konfirmasi${NC}: "; read -r cf
+    [[ "$cf" != "YES" ]] && { inf "Dibatalkan"; pause; return; }
+
+    mkdir -p "$BACKUPDIR"
+    local tmpf="$BACKUPDIR/restore-from-tg-$(date +%s).tar.gz"
+    inf "Mengunduh ${W}${fname}${NC} dari Telegram..."
+    if ! _tg_get_file "$fid" "$tmpf"; then
+        err "Gagal download file dari Telegram (file_id mungkin sudah expired)"
+        rm -f "$tmpf"
+        pause; return
+    fi
+
+    # Validasi tar.gz
+    if ! tar -tzPf "$tmpf" &>/dev/null; then
+        err "File yang diunduh BUKAN arsip tar.gz valid"
+        rm -f "$tmpf"
+        pause; return
+    fi
+
+    inf "Restoring..."
+    if tar -xzPf "$tmpf" -C /; then
+        ok "Restore selesai dari ${W}${fname}${NC}"
+        # Simpan file di BACKUPDIR (tidak hapus, biar user bisa pakai do_restore lokal kalau perlu)
+        mv "$tmpf" "$BACKUPDIR/${fname}" 2>/dev/null
+        systemctl daemon-reload
+        tool_restart_all >/dev/null 2>&1
+        _tg_send "$(printf '%s\n%s' "♻️ <b>Restore selesai — MAX</b>" "📁 <code>$(_tg_esc "$fname")</code>")"
+    else
+        err "Restore gagal saat extract!"
+        rm -f "$tmpf"
+    fi
     pause
 }
 
@@ -4149,16 +4664,17 @@ menu_backup() {
     while true; do
         show_header
         _top; _btn "  ${IT}${AL}💾  BACKUP & RESTORE${NC}"
-        _sep; _btn "  ${A2}[1]${NC}  💾  Backup Sekarang"
-        _sep; _btn "  ${A2}[2]${NC}  ♻️   Restore dari File"
-        _sep; _btn "  ${A2}[3]${NC}  📋  List File Backup"
-        _sep; _btn "  ${A2}[4]${NC}  🗑   Hapus Backup Lama"
+        _sep; _btn "  ${A2}[1]${NC}  💾  Backup Sekarang (+ kirim Telegram)"
+        _sep; _btn "  ${A2}[2]${NC}  ♻️   Restore dari File Lokal"
+        _sep; _btn "  ${A2}[3]${NC}  ☁️   Restore dari Telegram"
+        _sep; _btn "  ${A2}[4]${NC}  📋  List File Backup"
+        _sep; _btn "  ${A2}[5]${NC}  🗑   Hapus Backup Lama (>30 hari)"
         _sep; _btn "  ${LR}[0]${NC}  ◀   Kembali"
         _bot; echo ""
         echo -ne "  ${A1}›${NC} "; read -r ch
         case $ch in
-            1) do_backup ;; 2) do_restore ;;
-            3)
+            1) do_backup ;; 2) do_restore ;; 3) do_restore_tg ;;
+            4)
                 show_header; _top; _btn "  ${IT}${AL}📋  LIST BACKUP${NC}"; _bot
                 if [[ -d "$BACKUPDIR" ]]; then
                     ls -lh "$BACKUPDIR" 2>/dev/null | awk 'NR>1{printf "  %s  %s\n", $9, $5}'
@@ -4166,7 +4682,7 @@ menu_backup() {
                     warn "Belum ada backup"
                 fi
                 pause ;;
-            4)
+            5)
                 show_header; _top; _btn "  ${IT}${AL}🗑  HAPUS BACKUP > 30 HARI${NC}"; _bot
                 find "$BACKUPDIR" -name 'max-backup-*.tar.gz' -mtime +30 -delete -print 2>/dev/null
                 ok "Backup > 30 hari dihapus"; pause ;;
@@ -4460,6 +4976,21 @@ handle_cli_flags() {
             # Rotate: simpan max 10 backup
             ls -1t "$BACKUPDIR"/max-backup-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
             echo "[$(date)] auto-backup: $out"
+            # Kirim ke Telegram (kalau bot ter-setup)
+            if _tg_load && [[ -s "$out" ]]; then
+                local fname sz_h sz_b fid rc
+                fname=$(basename "$out")
+                sz_h=$(du -sh "$out" | cut -f1)
+                sz_b=$(stat -c%s "$out" 2>/dev/null || echo 0)
+                fid=$(_tg_send_doc "$out" "💾 Auto-backup ${fname} (${sz_h})" "$fname")
+                rc=$?
+                if [[ "$rc" == "0" && -n "$fid" ]]; then
+                    _tg_backup_record "$fname" "$sz_b" "$fid"
+                    echo "[$(date)] auto-backup uploaded to TG (file_id=${fid})"
+                else
+                    echo "[$(date)] auto-backup TG upload failed (rc=$rc)"
+                fi
+            fi
             exit 0
             ;;
         --check-update)
