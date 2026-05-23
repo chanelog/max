@@ -119,10 +119,17 @@ XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-
 HYSTERIA_URL="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64"
 TROJAN_GO_URL="https://github.com/p4gefau1t/trojan-go/releases/latest/download/trojan-go-linux-amd64.zip"
 UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
-SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
-OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
+# NOTE: URL lama untuk SlowDNS (khaledagn) & OHP (nopnopro) sudah dead/404.
+# Diganti dengan URL di repo chanelog/max. Bila binary belum di-upload,
+# installer akan otomatis SKIP fitur ini agar tidak ngeganggu service lain.
+SLOWDNS_URL="https://raw.githubusercontent.com/chanelog/max/main/sldns-server"
+OHP_URL="https://raw.githubusercontent.com/chanelog/max/main/ohpserver"
 
-SCRIPT_VERSION="1.11"
+# Toggle fitur opsional (auto = skip kalau download gagal)
+ENABLE_SLOWDNS="${ENABLE_SLOWDNS:-auto}"   # auto|yes|no
+ENABLE_OHP="${ENABLE_OHP:-auto}"           # auto|yes|no
+
+SCRIPT_VERSION="1.12"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
@@ -1249,19 +1256,27 @@ WGSC
 #  INSTALLER — SlowDNS (port 53 + 5300)
 # ════════════════════════════════════════════════════════════
 install_slowdns() {
+    # Skip kalau user matiin manual
+    if [[ "$ENABLE_SLOWDNS" == "no" ]]; then
+        warn "SlowDNS dimatikan oleh konfigurasi (ENABLE_SLOWDNS=no) — dilewati"
+        return 0
+    fi
+
     inf "Install SlowDNS server..."
     mkdir -p "$SLOW_DIR"
     if [[ ! -x "$SLOW_BIN" ]]; then
         if dl "$SLOWDNS_URL" "$SLOW_BIN"; then
             chmod +x "$SLOW_BIN"
             if ! verify_binary "$SLOW_BIN" 100000; then
-                warn "Binary SlowDNS terlalu kecil — mungkin gagal download"
+                warn "Binary SlowDNS terlalu kecil — fitur dilewati"
                 rm -f "$SLOW_BIN"
+                return 0
             else
                 ok "Binary SlowDNS terpasang"
             fi
         else
-            warn "Gagal download SlowDNS server — fitur akan dinonaktifkan"
+            warn "Gagal download SlowDNS — fitur opsional dilewati (tidak menggangu service lain)"
+            return 0
         fi
     else
         ok "SlowDNS sudah terpasang — skip"
@@ -1656,18 +1671,24 @@ NGX
 #  INSTALLER — OHP (OpenSSH Over HTTP) — opsional
 # ════════════════════════════════════════════════════════════
 install_ohp() {
+    # Skip kalau user matiin manual
+    if [[ "$ENABLE_OHP" == "no" ]]; then
+        warn "OHP dimatikan oleh konfigurasi (ENABLE_OHP=no) — dilewati"
+        return 0
+    fi
+
     inf "Install OHP (OpenSSH Over HTTP)..."
     if [[ ! -x "$OHP_BIN" ]]; then
         if dl "$OHP_URL" "$OHP_BIN"; then
             chmod +x "$OHP_BIN"
             if ! verify_binary "$OHP_BIN" 100000; then
                 rm -f "$OHP_BIN"
-                warn "Binary OHP gagal — dilewati"
-                return
+                warn "Binary OHP gagal — fitur opsional dilewati"
+                return 0
             fi
         else
-            warn "Gagal download OHP — fitur opsional dilewati"
-            return
+            warn "Gagal download OHP — fitur opsional dilewati (tidak menggangu service lain)"
+            return 0
         fi
     fi
     # Service OHP port 8080
