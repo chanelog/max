@@ -122,7 +122,10 @@ UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
 SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
 OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
 
-SCRIPT_VERSION="1.10"
+SCRIPT_VERSION="1.11"
+
+# SSH CDN Database
+CDN_DB="$DIR/cdn-users.db"    # user|pass|exp|maxlogin|domain
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
@@ -2049,7 +2052,7 @@ do_install_all() {
 
     # Buat file DB kosong supaya selalu ada
     for f in "$MLDB" "$SSH_DB" "$VMESS_DB" "$VLESS_DB" "$TROJAN_DB" \
-             "$TROJANGO_DB" "$OVPN_DB" "$WG_DB" "$HY_DB" "$SS_DB" "$SLOW_DB"; do
+             "$TROJANGO_DB" "$OVPN_DB" "$WG_DB" "$HY_DB" "$SS_DB" "$SLOW_DB" "$CDN_DB"; do
         touch "$f"
     done
 
@@ -3526,6 +3529,310 @@ check_maxlogin_all() {
 }
 
 # ════════════════════════════════════════════════════════════
+#  SSH CDN — WebSocket over Cloudflare CDN
+#  Path : /cdn-ssh  → Nginx → WS Proxy → SSH:22 / Dropbear:109
+#  Port CDN : 80, 8080, 8880, 2086 (HTTP)
+#           : 443, 2083, 2087, 8443 (TLS via Cloudflare)
+# ════════════════════════════════════════════════════════════
+
+# Telegram message builder untuk SSH CDN
+tg_msg_cdn() {
+    local u="$1" p="$2" e="$3" ml="${4:-2}" dom="${5:-}"
+    local ip brand
+    ip=$(get_ip); brand=$(_brand_name)
+    [[ -z "$dom" ]] && dom=$(get_domain)
+    cat <<EOM
+✅ <b>Akun SSH CDN (Cloudflare) — ${brand}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 Username  : <code>${u}</code>
+🔑 Password  : <code>${p}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🌐 Host (CDN): <code>${dom}</code>
+🖥 IP Asli   : <code>${ip}</code>
+🔌 Port HTTP : <code>80, 8080, 8880, 2086</code>
+🔒 Port TLS  : <code>443, 2083, 2087, 8443</code>
+🛣 WS Path   : <code>/cdn-ssh</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 MaxLogin  : <b>${ml} device</b>
+📅 Expired   : <b>${e}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 <b>Cara pakai:</b>
+• Aktifkan orange cloud 🟠 di Cloudflare DNS
+• Gunakan domain CDN sebagai host
+• Set WS path: /cdn-ssh
+• Pilih port yang didukung Cloudflare
+EOM
+}
+
+# Tampilan box SSH CDN di panel
+show_box_cdn() {
+    local u="$1" p="$2" exp="$3" maxl="${4:-2}" dom="${5:-}"
+    local ip
+    ip=$(get_ip)
+    [[ -z "$dom" ]] && dom=$(get_domain)
+    local brand="MAX PANEL"
+    [[ -f "$STRF" ]] && { source "$STRF" 2>/dev/null; brand="${BRAND:-MAX PANEL}"; }
+    echo ""
+    echo -e "  ${LG}✅ Akun SSH CDN (Cloudflare) — ${brand}${NC}"
+    echo -e "  ${A1}┌─────────────────────────────────────────────────────────${NC}"
+    printf  "  ${A1}│${NC} 👤 ${DIM}Username ${NC}: ${BLD}${W}%s${NC}\n" "$u"
+    printf  "  ${A1}│${NC} 🔑 ${DIM}Password ${NC}: ${BLD}${A3}%s${NC}\n" "$p"
+    echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
+    printf  "  ${A1}│${NC} 🌐 ${DIM}Host CDN ${NC}: ${W}%s${NC}  ${DIM}(Cloudflare)${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} 🖥  ${DIM}IP Asli  ${NC}: ${LG}%s${NC}\n" "$ip"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}Port HTTP${NC}: ${Y}80, 8080, 8880, 2086${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}Port TLS ${NC}: ${Y}443, 2083, 2087, 8443${NC}\n"
+    printf  "  ${A1}│${NC} 🛣  ${DIM}WS Path  ${NC}: ${Y}/cdn-ssh${NC}\n"
+    echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}MaxLogin ${NC}: ${Y}%s device${NC}\n" "$maxl"
+    printf  "  ${A1}│${NC} 📅 ${DIM}Expired  ${NC}: ${Y}%s${NC}\n" "$exp"
+    echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
+    echo -e "  ${A1}│${NC} ${DIM}💡 Cloudflare: aktifkan orange cloud 🟠 di DNS${NC}"
+    echo -e "  ${A1}└─────────────────────────────────────────────────────────${NC}"
+    echo ""
+}
+
+# Install / setup Nginx path /cdn-ssh (idempotent)
+setup_cdn_ws_path() {
+    local dom; dom=$(get_domain)
+    # Cek apakah /cdn-ssh sudah ada di Nginx config
+    if grep -q "/cdn-ssh" /etc/nginx/conf.d/xray.conf 2>/dev/null; then
+        ok "Path /cdn-ssh sudah ada di Nginx — skip"
+        return 0
+    fi
+    inf "Menambahkan path /cdn-ssh ke Nginx config..."
+    # Tambahkan location /cdn-ssh ke server block HTTP 80 (sebelum closing brace)
+    # Gunakan sed untuk insert sebelum "location / { return 200" pada server HTTP 80
+    local cdn_block
+    cdn_block=$(cat <<'CDNLOC'
+    # SSH CDN — WebSocket over Cloudflare (HTTP)
+    location = /cdn-ssh {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:8880;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 7200s;
+        proxy_buffering off;
+    }
+CDNLOC
+)
+    # Backup config dulu
+    cp /etc/nginx/conf.d/xray.conf /etc/nginx/conf.d/xray.conf.bak 2>/dev/null
+    # Tambahkan setelah blok /ws-ssh pada server 80 (sisipkan 1x setelah proxy_buffering off; dari /ws-ssh)
+    python3 - <<PYEOF 2>/dev/null
+import re, sys
+
+with open('/etc/nginx/conf.d/xray.conf', 'r') as f:
+    content = f.read()
+
+cdn_block = '''
+    # SSH CDN — WebSocket over Cloudflare
+    location = /cdn-ssh {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:8880;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 7200s;
+        proxy_buffering off;
+    }
+'''
+
+# Insert setelah block /ws-ssh (cari proxy_buffering off; dalam context ws-ssh)
+marker = '        proxy_buffering off;\n    }\n\n    location / { return 200'
+if '/cdn-ssh' not in content:
+    content = content.replace(
+        '    location / { return 200 \'MAX PANEL OK\'; add_header Content-Type text/plain; }\n}\n\n# === TLS',
+        cdn_block + '\n    location / { return 200 \'MAX PANEL OK\'; add_header Content-Type text/plain; }\n}\n\n# === TLS',
+        1
+    )
+    with open('/etc/nginx/conf.d/xray.conf', 'w') as f:
+        f.write(content)
+    print('OK')
+else:
+    print('SKIP')
+PYEOF
+    if nginx -t &>/dev/null; then
+        systemctl reload nginx 2>/dev/null
+        ok "Path /cdn-ssh berhasil ditambahkan ke Nginx"
+    else
+        # Rollback jika gagal
+        mv /etc/nginx/conf.d/xray.conf.bak /etc/nginx/conf.d/xray.conf 2>/dev/null
+        systemctl reload nginx 2>/dev/null
+        warn "Gagal update Nginx — rollback dilakukan"
+    fi
+}
+
+# ── User Management SSH CDN ────────────────────────────────
+cdn_add() {
+    show_header
+    _top; _btn "  ${IT}${AL}➕  BUAT AKUN SSH CDN${NC}"; _bot; echo ""
+    echo -ne "  ${A3}Username${NC}              : "; read -r u
+    [[ -z "$u" ]] && { pause; return; }
+    grep -q "^${u}|" "$CDN_DB" 2>/dev/null && { err "User sudah ada!"; pause; return; }
+    if id "$u" &>/dev/null; then err "User sistem '$u' sudah ada!"; pause; return; fi
+    echo -ne "  ${A3}Password${NC} [auto]      : "; read -r p
+    [[ -z "$p" ]] && p=$(rand_pass)
+    echo -ne "  ${A3}Masa aktif (hari)${NC} [30]: "; read -r d
+    [[ ! "$d" =~ ^[0-9]+$ ]] && d=30
+    echo -ne "  ${A3}Max Login Device${NC} [2]  : "; read -r ml
+    [[ ! "$ml" =~ ^[0-9]+$ ]] && ml=2
+
+    local exp; exp=$(mk_exp "$d")
+    local dom; dom=$(get_domain)
+
+    useradd -e "$exp" -s /bin/false -M "$u" 2>/dev/null
+    echo -e "${p}\n${p}" | passwd "$u" &>/dev/null
+    echo "${u}|${p}|${exp}|${ml}|${dom}" >> "$CDN_DB"
+    set_maxlogin "$u" "$ml"
+
+    # Pastikan path /cdn-ssh ada di Nginx
+    setup_cdn_ws_path
+
+    show_box_cdn "$u" "$p" "$exp" "$ml" "$dom"
+    _tg_send "$(tg_msg_cdn "$u" "$p" "$exp" "$ml" "$dom")"
+    pause
+}
+
+cdn_trial() {
+    show_header
+    _top; _btn "  ${IT}${AL}🎁  AKUN SSH CDN TRIAL (1 JAM)${NC}"; _bot; echo ""
+    echo -ne "  ${A3}Username${NC}: "; read -r u
+    [[ -z "$u" ]] && { pause; return; }
+    grep -q "^${u}|" "$CDN_DB" 2>/dev/null && { err "User sudah ada!"; pause; return; }
+    if id "$u" &>/dev/null; then err "User sistem '$u' sudah ada!"; pause; return; fi
+    local p; p=$(rand_pass)
+    local exp; exp=$(TZ="Asia/Jakarta" date -d "+1 hour" +"%Y-%m-%d")
+    local ml=1 dom; dom=$(get_domain)
+
+    useradd -e "$exp" -s /bin/false -M "$u" 2>/dev/null
+    echo -e "${p}\n${p}" | passwd "$u" &>/dev/null
+    echo "${u}|${p}|${exp}|${ml}|${dom}" >> "$CDN_DB"
+    set_maxlogin "$u" "$ml"
+    setup_cdn_ws_path
+
+    show_box_cdn "$u" "$p" "$exp" "$ml" "$dom"
+    _tg_send "$(tg_msg_cdn "$u" "$p" "$exp" "$ml" "$dom")"
+    pause
+}
+
+cdn_del() {
+    show_header
+    _top; _btn "  ${IT}${AL}🗑   HAPUS AKUN SSH CDN${NC}"; _bot; echo ""
+    if [[ ! -s "$CDN_DB" ]]; then warn "Belum ada akun CDN."; pause; return; fi
+    awk -F'|' '{printf "  %-15s  %-12s  %s\n", $1, $3, $5}' "$CDN_DB"
+    echo ""
+    echo -ne "  ${A3}Username${NC}: "; read -r u
+    grep -q "^${u}|" "$CDN_DB" || { err "Tidak ada!"; pause; return; }
+    userdel -r "$u" 2>/dev/null
+    sed -i "/^${u}|/d" "$CDN_DB"
+    del_maxlogin "$u"
+    ok "Akun CDN ${W}${u}${NC} dihapus"
+    pause
+}
+
+cdn_renew() {
+    show_header
+    _top; _btn "  ${IT}${AL}🔁  PERPANJANG SSH CDN${NC}"; _bot; echo ""
+    if [[ ! -s "$CDN_DB" ]]; then warn "Belum ada akun CDN."; pause; return; fi
+    awk -F'|' '{printf "  %-15s  %-12s  %s\n", $1, $3, $5}' "$CDN_DB"
+    echo ""
+    echo -ne "  ${A3}Username${NC}: "; read -r u
+    grep -q "^${u}|" "$CDN_DB" || { err "Tidak ada!"; pause; return; }
+    echo -ne "  ${A3}Tambah hari${NC} [30]: "; read -r d
+    [[ ! "$d" =~ ^[0-9]+$ ]] && d=30
+    local cur new
+    cur=$(grep "^${u}|" "$CDN_DB" | cut -d'|' -f3)
+    new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
+    sed -i "s|^\(${u}|[^|]*|\)[^|]*||\1${new}||" "$CDN_DB" 2>/dev/null || \
+    sed -i "s|^${u}|\([^|]*\)|\([^|]*\)|[^|]*|\(.*\)$|${u}|\1|\2|${new}|\3|" "$CDN_DB" 2>/dev/null
+    # Simple replacement
+    local line; line=$(grep "^${u}|" "$CDN_DB")
+    local newline; newline=$(echo "$line" | awk -F'|' -v nd="$new" 'BEGIN{OFS="|"}{$3=nd;print}')
+    sed -i "s|^${u}|.*|${newline}|" "$CDN_DB" 2>/dev/null
+    sed -i "/^${u}|/c\\${newline}" "$CDN_DB" 2>/dev/null
+    chage -E "$new" "$u" 2>/dev/null
+    ok "Diperpanjang → ${Y}${new}${NC}"
+    pause
+}
+
+cdn_list() {
+    show_header
+    _top; _btn "  ${IT}${AL}📋  LIST AKUN SSH CDN${NC}"; _bot; echo ""
+    if [[ ! -s "$CDN_DB" ]]; then warn "Belum ada akun CDN."; pause; return; fi
+    printf "  ${BLD}${A3}%-3s %-15s %-12s %-6s %-20s${NC}\n" "No" "User" "Expired" "Login" "Domain"
+    _sep
+    local i=0
+    while IFS='|' read -r u p e ml dom; do
+        i=$((i+1))
+        local col
+        if is_expired "$e"; then col="$LR"
+        elif [[ "$(days_left "$e")" -le 3 ]]; then col="$Y"
+        else col="$LG"
+        fi
+        printf "  %-3s ${W}%-15s${NC} ${col}%-12s${NC} ${Y}%-6s${NC} ${A3}%-20s${NC}\n" \
+            "$i." "$u" "$e" "$ml" "$dom"
+    done < "$CDN_DB"
+    _sep
+    pause
+}
+
+cdn_clean_expired() {
+    show_header
+    _top; _btn "  ${IT}${AL}🧹  HAPUS AKUN CDN EXPIRED${NC}"; _bot; echo ""
+    local td; td=$(TZ="Asia/Jakarta" date +%Y-%m-%d)
+    local count=0
+    while IFS='|' read -r u p e ml dom; do
+        if [[ -n "$e" && "$td" > "$e" ]]; then
+            userdel -r "$u" 2>/dev/null
+            sed -i "/^${u}|/d" "$CDN_DB"
+            del_maxlogin "$u"
+            count=$((count+1))
+            ok "Dihapus: ${W}${u}${NC} (expired: ${Y}${e}${NC})"
+        fi
+    done < <(cat "$CDN_DB" 2>/dev/null)
+    [[ $count -eq 0 ]] && inf "Tidak ada akun expired."
+    ok "Total dihapus: ${Y}${count}${NC}"
+    pause
+}
+
+cdn_info() {
+    show_header
+    _top; _btn "  ${IT}${AL}ℹ️   INFO SSH CDN & CLOUDFLARE${NC}"; _bot; echo ""
+    local dom ip
+    dom=$(get_domain); ip=$(get_ip)
+    echo -e "  ${A1}${_DASH}${NC}"
+    echo -e "  ${A4}◈${NC} ${BLD}Cara Setup SSH CDN dengan Cloudflare${NC}"
+    echo -e "  ${A1}${_DASH}${NC}"
+    echo -e "  ${A2}Step 1.${NC} Daftarkan domain ke ${W}Cloudflare${NC} (gratis)"
+    echo -e "  ${A2}Step 2.${NC} Buat DNS A record:"
+    printf  "          ${DIM}Name :${NC} ${W}ssh${NC}  →  ${DIM}IP :${NC} ${LG}%s${NC}\n" "$ip"
+    echo -e "  ${A2}Step 3.${NC} Aktifkan ${Y}Proxy / Orange Cloud 🟠${NC} di Cloudflare"
+    echo -e "  ${A2}Step 4.${NC} Gunakan domain ${W}${dom}${NC} sebagai host"
+    echo -e "  ${A2}Step 5.${NC} Set WS Path: ${Y}/cdn-ssh${NC}"
+    echo -e "  ${A1}${_DASH}${NC}"
+    echo -e "  ${BLD}${AL}Port yang didukung Cloudflare:${NC}"
+    echo -e "  ${A2}HTTP  :${NC} ${Y}80, 8080, 8880, 2086${NC}"
+    echo -e "  ${A2}HTTPS :${NC} ${Y}443, 2083, 2087, 8443${NC}"
+    echo -e "  ${A1}${_DASH}${NC}"
+    echo -e "  ${BLD}${AL}Status Nginx path /cdn-ssh:${NC}"
+    if grep -q "/cdn-ssh" /etc/nginx/conf.d/xray.conf 2>/dev/null; then
+        echo -e "  ${LG}● Path /cdn-ssh sudah aktif di Nginx${NC}"
+    else
+        echo -e "  ${LR}● Path /cdn-ssh belum ada — jalankan 'Buat Akun' untuk setup otomatis${NC}"
+    fi
+    echo -e "  ${A1}${_DASH}${NC}"
+    pause
+}
+
+# ════════════════════════════════════════════════════════════
 #  CRON JOBS — Auto-delete expired + MaxLogin + Backup
 # ════════════════════════════════════════════════════════════
 install_cron_jobs() {
@@ -3566,8 +3873,8 @@ do_clean_expired_all() {
     local td count=0
     td=$(TZ="Asia/Jakarta" date +%Y-%m-%d)
 
-    # SSH / OpenVPN / SlowDNS (system user)
-    for db in "$SSH_DB" "$OVPN_DB" "$SLOW_DB"; do
+    # SSH / OpenVPN / SlowDNS / CDN (system user)
+    for db in "$SSH_DB" "$OVPN_DB" "$SLOW_DB" "$CDN_DB"; do
         [[ -s "$db" ]] || continue
         while IFS='|' read -r u p e ml; do
             if [[ -n "$e" && "$td" > "$e" ]]; then
@@ -4792,9 +5099,9 @@ main_menu() {
         echo -e "  ${A1}${_DASH}${NC}"
         _r2 "${A2}" "[13] ℹ️  About              " "${A4}" "[14] 🚀  Install Ulang"
         echo -e "  ${A1}${_DASH}${NC}"
-        _r2 "${A2}" "[C]  🔎  Cek Semua Proxy    " "${LR}" "[E]  🗑  Uninstall"
+        _r2 "${A2}" "[15] ☁️   SSH CDN (CF)      " "${A2}" "[C]  🔎  Cek Semua Proxy"
         echo -e "  ${A1}${_DASH}${NC}"
-        _r2 "${LR}" "[X]  ✗   Keluar             " "${DIM}" "                       "
+        _r2 "${LR}" "[E]  🗑  Uninstall          " "${LR}" "[X]  ✗   Keluar"
         echo -e "  ${A1}${_DASH}${NC}"
         echo -e "  ${DIM}                   ✦  MAX PANEL v${SCRIPT_VERSION}  ✦                ${NC}"
         echo ""
@@ -4814,12 +5121,46 @@ main_menu() {
             12) cek_update ;;
             13) menu_about ;;
             14) do_install_all ;;
+            15) menu_cdn ;;
             c)  cek_all_proxy ;;
             e)  do_uninstall ;;
             x|0)
                 echo -e "\n  ${IT}${AL}Sampai jumpa! — MAX PANEL${NC}\n"
                 exit 0 ;;
             *)  warn "Pilihan tidak valid!"; sleep 1 ;;
+        esac
+    done
+}
+
+# ════════════════════════════════════════════════════════════
+#  MENU SSH CDN (Cloudflare)
+# ════════════════════════════════════════════════════════════
+menu_cdn() {
+    while true; do
+        show_header
+        _top; _btn "  ${IT}${AL}☁️   SSH CDN — WebSocket via Cloudflare${NC}"
+        _sep; _btn "  ${A2}[1]${NC}  ➕  Buat Akun SSH CDN"
+        _sep; _btn "  ${A2}[2]${NC}  🎁  Akun Trial (1 jam)"
+        _sep; _btn "  ${A2}[3]${NC}  🗑   Hapus Akun"
+        _sep; _btn "  ${A2}[4]${NC}  🔁  Perpanjang Akun"
+        _sep; _btn "  ${A2}[5]${NC}  📋  List Semua Akun"
+        _sep; _btn "  ${A2}[6]${NC}  🧹  Hapus Akun Expired"
+        _sep; _btn "  ${A2}[7]${NC}  ℹ️   Info & Cara Setup CDN"
+        _sep; _btn "  ${A2}[8]${NC}  🔧  Setup Path /cdn-ssh ke Nginx"
+        _sep; _btn "  ${LR}[0]${NC}  ◀   Kembali"
+        _bot; echo ""
+        echo -ne "  ${A1}›${NC} "; read -r ch
+        case $ch in
+            1) cdn_add ;;
+            2) cdn_trial ;;
+            3) cdn_del ;;
+            4) cdn_renew ;;
+            5) cdn_list ;;
+            6) cdn_clean_expired ;;
+            7) cdn_info ;;
+            8) setup_cdn_ws_path; ok "Selesai setup path CDN"; sleep 1 ;;
+            0) break ;;
+            *) warn "Pilihan tidak valid"; sleep 1 ;;
         esac
     done
 }
@@ -4862,8 +5203,8 @@ do_uninstall() {
     sed -i '/MAX-PANEL-SPLASH/,+1d' /root/.bashrc 2>/dev/null
     sed -i "/alias menu-max=/d;/alias max-menu=/d" /root/.bashrc 2>/dev/null
 
-    # Hapus user yang dibuat panel (SSH/OpenVPN/SlowDNS DB)
-    for db in "$SSH_DB" "$OVPN_DB" "$SLOW_DB"; do
+    # Hapus user yang dibuat panel (SSH/OpenVPN/SlowDNS/CDN DB)
+    for db in "$SSH_DB" "$OVPN_DB" "$SLOW_DB" "$CDN_DB"; do
         [[ -s "$db" ]] || continue
         while IFS='|' read -r u _ _ _; do userdel -r "$u" 2>/dev/null; done < "$db"
     done
@@ -5043,7 +5384,7 @@ mkdir -p "$DIR" "$LOGDIR" "$BACKUPDIR"
 # Theme & touch DB files
 load_theme
 for f in "$MLDB" "$SSH_DB" "$VMESS_DB" "$VLESS_DB" "$TROJAN_DB" \
-         "$TROJANGO_DB" "$OVPN_DB" "$WG_DB" "$HY_DB" "$SS_DB" "$SLOW_DB"; do
+         "$TROJANGO_DB" "$OVPN_DB" "$WG_DB" "$HY_DB" "$SS_DB" "$SLOW_DB" "$CDN_DB"; do
     [[ ! -f "$f" ]] && touch "$f"
 done
 
