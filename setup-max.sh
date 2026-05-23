@@ -122,7 +122,7 @@ UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
 SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
 OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
 
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="1.1"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
@@ -543,6 +543,11 @@ _tg_render_ssh() {
 🔒 <b>SSL/Stun.</b>: <code>445, 777</code>
 🔌 <b>WS HTTP</b>  : <code>80 (/ws-ssh)</code>
 🔒 <b>WS HTTPS</b> : <code>443 (/ws-ssh)</code>
+🔌 <b>WS NTLS</b>  : <code>8880 (/ws-ssh)</code>
+────────────────────────────────────
+☁️ <b>CDN TLS</b>  : <code>$(_tg_esc "$dom"):443:/ws-ssh</code>
+☁️ <b>CDN NTLS</b> : <code>$(_tg_esc "$dom"):80:/ws-ssh</code>
+☁️ <b>CDN 8880</b> : <code>$(_tg_esc "$dom"):8880:/ws-ssh</code>
 📡 <b>OpenVPN</b>  : <code>TCP 1194 / UDP 2200</code>
 📡 <b>UDPGW</b>    : <code>7100, 7200, 7300</code>
 ────────────────────────────────────
@@ -930,6 +935,11 @@ show_box_ssh() {
     printf  "  ${A1}│${NC} 🔒 ${DIM}SSL/Stun.${NC}: ${Y}445, 777${NC}\n"
     printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}80 (/ws-ssh)${NC}\n"
     printf  "  ${A1}│${NC} 🔒 ${DIM}WS HTTPS ${NC}: ${Y}443 (/ws-ssh)${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}WS NTLS  ${NC}: ${Y}8880 (/ws-ssh)${NC}\n"
+    echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
+    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN TLS  ${NC}: ${Y}%s:443:/ws-ssh${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN NTLS ${NC}: ${Y}%s:80:/ws-ssh${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN 8880 ${NC}: ${Y}%s:8880:/ws-ssh${NC}\n" "$dom"
     printf  "  ${A1}│${NC} 📡 ${DIM}OpenVPN  ${NC}: ${Y}TCP 1194 / UDP 2200${NC}\n"
     printf  "  ${A1}│${NC} 📡 ${DIM}UDPGW    ${NC}: ${Y}7100, 7200, 7300${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
@@ -1678,7 +1688,7 @@ install_ws_proxy() {
 #!/usr/bin/env python3
 # MAX WS Proxy — HTTP CONNECT/Injector style proxy
 # Listens on 127.0.0.1:<port>, accepts HTTP upgrade, forwards raw TCP to SSH/Dropbear backend.
-# Dipakai sebagai backend untuk Nginx (path /ws-ssh). Tidak listen public.
+# Dipakai sebagai backend untuk Nginx (path /ws-ssh). Listen di 127.0.0.1:8881 (internal).
 import socket, threading, select, sys, signal
 
 LISTEN_HOST = '127.0.0.1'
@@ -1793,15 +1803,15 @@ WSPY
             rm -f "$stale"
         fi
     done
-    cat > /etc/systemd/system/ws-max-8880.service <<WSSVC
+    cat > /etc/systemd/system/ws-max-8881.service <<WSSVC
 [Unit]
-Description=MAX WS Proxy (internal 127.0.0.1:8880, reverse-proxied by Nginx)
+Description=MAX WS Proxy (internal 127.0.0.1:8881, reverse-proxied by Nginx)
 After=network.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 $WS_BIN 8880
+ExecStart=/usr/bin/python3 $WS_BIN 8881
 Restart=on-failure
 RestartSec=3
 
@@ -1809,8 +1819,8 @@ RestartSec=3
 WantedBy=multi-user.target
 WSSVC
     systemctl daemon-reload
-    systemctl enable  ws-max-8880 &>/dev/null
-    systemctl restart ws-max-8880 2>/dev/null
+    systemctl enable  ws-max-8881 &>/dev/null
+    systemctl restart ws-max-8881 2>/dev/null
 
     # FIX: TIDAK lagi append stunnel WS-TLS sections. Nginx terminasi TLS di port 443.
     # Hapus block stunnel WS-TLS lama (idempotent) bila tertinggal dari versi sebelumnya.
@@ -1823,7 +1833,7 @@ WSSVC
         systemctl restart stunnel4 2>/dev/null
     fi
 
-    ok "WS proxy aktif di 127.0.0.1:8880 (path /ws-ssh → Nginx 80/443)"
+    ok "WS proxy aktif di 127.0.0.1:8881 (path /ws-ssh → Nginx 80/443/8880)"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1850,7 +1860,7 @@ install_nginx() {
     #   /trojan-ws   → 10003  (Trojan WS)
     #   /vless-grpc  → 10004  (VLess gRPC)  — hanya di server TLS
     #   /trojan-grpc → 10005  (Trojan gRPC) — hanya di server TLS
-    #   /ws-ssh      → 8880   (SSH-over-WS via python proxy)
+    #   /ws-ssh      → 8881   (SSH-over-WS via python proxy, 8880=public NTLS)
     cat > /etc/nginx/conf.d/xray.conf <<NGX
 # MAX PANEL — Xray reverse-proxy (HTTP 80 + TLS 443 + alt-TLS 8443)
 # === SHARED PROXY HEADERS ===========================================
@@ -1900,7 +1910,7 @@ server {
     # SSH-over-WebSocket (Nginx → python WS proxy → SSH:22 / Dropbear:109)
     location = /ws-ssh {
         proxy_redirect off;
-        proxy_pass http://127.0.0.1:8880;
+        proxy_pass http://127.0.0.1:8881;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
@@ -1963,7 +1973,7 @@ server {
         proxy_read_timeout 300s;
     }
     location = /ws-ssh {
-        proxy_pass http://127.0.0.1:8880;
+        proxy_pass http://127.0.0.1:8881;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
@@ -1998,7 +2008,25 @@ server {
     location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
     location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
     location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
-    location = /ws-ssh    { proxy_pass http://127.0.0.1:8880;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_buffering off; }
+    location = /ws-ssh    { proxy_pass http://127.0.0.1:8881;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_buffering off; }
+    location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
+}
+
+# === NTLS 8880 (public — SSH WS CDN non-TLS direct) ==================
+server {
+    listen 8880;
+    listen [::]:8880;
+    server_name ${dom} _;
+
+    location = /ws-ssh {
+        proxy_pass http://127.0.0.1:8881;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_read_timeout 7200s;
+        proxy_buffering off;
+    }
     location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
 }
 NGX
@@ -2142,7 +2170,7 @@ do_install_all() {
     printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}445, 777${NC}\n"
     printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}80${NC}  — paths: /vmess /vless /trojan-ws /ws-ssh\n"
     printf  "  ${A3}•${NC} Nginx (TLS)     : ${Y}443${NC}, ${Y}8443${NC} alt — + /vless-grpc /trojan-grpc\n"
-    printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}/ws-ssh${NC} (→ internal 127.0.0.1:8880)\n"
+    printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}/ws-ssh${NC} (→ internal 127.0.0.1:8881)\n"
     printf  "  ${A3}•${NC} OpenVPN         : ${Y}TCP 1194, UDP 2200${NC}\n"
     printf  "  ${A3}•${NC} Xray VMess WS   : ${Y}/vmess (80, 443)${NC}\n"
     printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (80, 443)${NC} + gRPC ${Y}443${NC}\n"
@@ -3843,7 +3871,7 @@ tool_restart_all() {
     local svcs=(ssh sshd dropbear stunnel4 xray trojan-go hysteria-server \
                 openvpn-server@tcp openvpn-server@udp wg-quick@wg0 nginx \
                 badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 \
-                ws-max-8880 slowdns ohp)
+                ws-max-8881 slowdns ohp)
     for s in "${svcs[@]}"; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${s}\\.service"; then
             if systemctl restart "$s" 2>/dev/null; then
@@ -3862,7 +3890,7 @@ tool_check_service() {
     local svcs=(ssh dropbear stunnel4 xray trojan-go hysteria-server \
                 openvpn-server@tcp openvpn-server@udp wg-quick@wg0 nginx \
                 badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 \
-                ws-max-8880 slowdns ohp cron)
+                ws-max-8881 slowdns ohp cron)
     printf "  ${BLD}${A3}%-28s %s${NC}\n" "SERVICE" "STATUS"
     _sep
     for s in "${svcs[@]}"; do
@@ -4830,7 +4858,7 @@ do_uninstall() {
     inf "Menghentikan service..."
     for s in xray trojan-go hysteria-server wg-quick@wg0 stunnel4 dropbear \
              openvpn-server@tcp openvpn-server@udp slowdns ohp \
-             ws-max-8880 \
+             ws-max-8881 \
              badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 nginx; do
         systemctl stop "$s" 2>/dev/null
         systemctl disable "$s" 2>/dev/null
