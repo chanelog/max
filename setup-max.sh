@@ -115,12 +115,12 @@ WS_BIN="/usr/local/bin/ws-max"
 OHP_BIN="/usr/local/bin/ohpserver"
 
 # URLs binary
-XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-HYSTERIA_URL="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64"
-TROJAN_GO_URL="https://github.com/p4gefau1t/trojan-go/releases/latest/download/trojan-go-linux-amd64.zip"
+XRAY_URL="https://github.com/chanelog/max/releases/download/bin/Xray-linux-64.zip"
+HYSTERIA_URL="https://github.com/chanelog/max/releases/download/bin/hysteria-linux-amd64"
+TROJAN_GO_URL="https://github.com/chanelog/max/releases/download/bin/trojan-go-linux-amd64.zip"
 UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
-SLOWDNS_URL="https://raw.githubusercontent.com/khaledagn/AGN-UDP/main/sldns-server"
-OHP_URL="https://github.com/nopnopro/script/raw/master/file/ohpserver"
+SLOWDNS_URL="https://github.com/chanelog/max/raw/main/sldns-server"
+OHP_URL="https://github.com/chanelog/max/raw/main/ohpserver"
 
 SCRIPT_VERSION="1.0"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
