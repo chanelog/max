@@ -122,7 +122,7 @@ UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
 SLOWDNS_URL="https://github.com/chanelog/max/raw/main/sldns-server"
 OHP_URL="https://github.com/chanelog/max/raw/main/ohpserver"
 
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="1.1"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
