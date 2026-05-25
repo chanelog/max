@@ -3919,7 +3919,7 @@ tool_restart_all() {
     local svcs=(ssh sshd dropbear stunnel4 xray trojan-go hysteria-server \
                 openvpn-server@tcp openvpn-server@udp wg-quick@wg0 nginx \
                 badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 \
-                ws-max-8881 slowdns ohp)
+                ws slowdns ohp)
     for s in "${svcs[@]}"; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${s}\\.service"; then
             if systemctl restart "$s" 2>/dev/null; then
@@ -3938,7 +3938,7 @@ tool_check_service() {
     local svcs=(ssh dropbear stunnel4 xray trojan-go hysteria-server \
                 openvpn-server@tcp openvpn-server@udp wg-quick@wg0 nginx \
                 badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 \
-                ws-max-8881 slowdns ohp cron)
+                ws slowdns ohp cron)
     printf "  ${BLD}${A3}%-28s %s${NC}\n" "SERVICE" "STATUS"
     _sep
     for s in "${svcs[@]}"; do
@@ -4906,7 +4906,7 @@ do_uninstall() {
     inf "Menghentikan service..."
     for s in xray trojan-go hysteria-server wg-quick@wg0 stunnel4 dropbear \
              openvpn-server@tcp openvpn-server@udp slowdns ohp \
-             ws-max-8881 \
+             ws \
              badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300 nginx; do
         systemctl stop "$s" 2>/dev/null
         systemctl disable "$s" 2>/dev/null
@@ -4918,7 +4918,8 @@ do_uninstall() {
     rm -f  /etc/systemd/system/xray.service /etc/systemd/system/trojan-go.service
     rm -f  /etc/systemd/system/hysteria-server.service /etc/systemd/system/slowdns.service
     rm -f  /etc/systemd/system/badvpn-udpgw-*.service
-    rm -f  /etc/systemd/system/ws-max-*.service /etc/systemd/system/ohp.service
+    rm -f  /etc/systemd/system/ws-max-*.service /etc/systemd/system/ws.service /etc/systemd/system/ohp.service
+    rm -f  /usr/bin/tun.conf 2>/dev/null
     rm -f  /etc/cron.d/maxpanel-*
     rm -f  /usr/local/bin/menu-max /usr/local/bin/max-menu
 
