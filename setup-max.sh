@@ -1042,29 +1042,24 @@ install_deps() {
 #  INSTALLER — SSH + Dropbear + Stunnel
 # ════════════════════════════════════════════════════════════
 install_ssh() {
-    inf "Konfigurasi OpenSSH (port 2222 — Dropbear akan pakai port 22)..."
-    # OpenSSH dipindah ke port 2222, port 22 diserahkan ke Dropbear
-    sed -i 's/^#\?Port .*/Port 2222/' /etc/ssh/sshd_config 2>/dev/null
-    grep -qE '^Port[[:space:]]+2222$' /etc/ssh/sshd_config 2>/dev/null || \
-        echo "Port 2222" >> /etc/ssh/sshd_config
-    # Bersihkan baris "Port 80" / "Port 443" / "Port 22" jika ada (sisa install lama)
-    sed -i '/^Port[[:space:]]\+80$/d'  /etc/ssh/sshd_config 2>/dev/null
-    sed -i '/^Port[[:space:]]\+443$/d' /etc/ssh/sshd_config 2>/dev/null
-    sed -i '/^Port[[:space:]]\+22$/d'  /etc/ssh/sshd_config 2>/dev/null
-    # PermitRoot login & password auth (sesuaikan)
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
-    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-    ok "OpenSSH siap: 2222 (Dropbear pakai port 22)"
-
-    # ── Dropbear ─────────────────────────────────────────────────────────
+    # ── Dropbear DULU ─────────────────────────────────────────────────────
+    # FIX: Dropbear di-config & restart DULU (sebelum sshd) supaya:
+    #  1. Bisa kita force release port 2222 kalau dropbear lama nyangkut
+    #     (misalnya install sebelumnya keliru → Dropbear listen 2222)
+    #  2. Saat sshd restart, port 2222 sudah dijamin bebas
     inf "Konfigurasi Dropbear (port 22, 143)..."
+
+    # Stop dropbear dulu — kalau lagi listen di 2222 akan blokir sshd
+    systemctl stop dropbear 2>/dev/null
+
     if [[ -f /etc/default/dropbear ]]; then
         sed -i 's/^NO_START=.*/NO_START=0/' /etc/default/dropbear
         # Hapus semua baris DROPBEAR_PORT (termasuk yang di-comment) lalu tambah baru
         sed -i '/^#\?DROPBEAR_PORT=/d' /etc/default/dropbear
         echo 'DROPBEAR_PORT=22' >> /etc/default/dropbear
         # Hapus semua baris DROPBEAR_EXTRA_ARGS lalu tambah baru
+        # (Wajib hapus dulu — versi lama panel mungkin set "-p 2222 -p 143"
+        # yang bikin Dropbear nyangkut di port 2222 → bentrok dengan sshd)
         sed -i '/^#\?DROPBEAR_EXTRA_ARGS=/d' /etc/default/dropbear
         echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
     fi
@@ -1076,9 +1071,59 @@ install_ssh() {
     # Pastikan /bin/false dan /usr/sbin/nologin ada di /etc/shells
     grep -qx '/bin/false'         /etc/shells 2>/dev/null || echo '/bin/false'         >> /etc/shells
     grep -qx '/usr/sbin/nologin'  /etc/shells 2>/dev/null || echo '/usr/sbin/nologin'  >> /etc/shells
+
+    # Force kill apa pun yang masih nyangkut di port 2222 (sisa Dropbear lama,
+    # sshd lama, atau service apa pun) — biar `sshd` bisa bind nanti.
+    if command -v fuser &>/dev/null; then
+        fuser -k 2222/tcp &>/dev/null
+    elif command -v lsof &>/dev/null; then
+        lsof -ti :2222 -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null
+    fi
+    sleep 1
+
     systemctl enable dropbear &>/dev/null
     systemctl restart dropbear 2>/dev/null
     ok "Dropbear siap: 22, 143"
+
+    # ── OpenSSH ─────────────────────────────────────────────────────────
+    inf "Konfigurasi OpenSSH (port 2222 — Dropbear pegang port 22)..."
+
+    # Bersihkan baris Port lama (semua varian) — termasuk Port 22/80/443/2222
+    # yang mungkin double dari install sebelumnya. Lebih agresif daripada
+    # versi sebelumnya supaya hasil akhir bersih.
+    sed -i '/^[[:space:]]*#\?[[:space:]]*Port[[:space:]]\+[0-9]\+[[:space:]]*$/d' \
+        /etc/ssh/sshd_config 2>/dev/null
+    # Tulis baris Port 2222 yang baru
+    echo "Port 2222" >> /etc/ssh/sshd_config
+    # PermitRoot login & password auth (sesuaikan)
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
+
+    # FIX: Pastikan /run/sshd exists (sshd butuh untuk privilege separation).
+    # Bug umum di Debian: /run/sshd hilang setelah update systemd / reboot
+    # sehingga sshd gagal start dengan error "Missing privilege separation directory".
+    mkdir -p /run/sshd
+    chmod 0755 /run/sshd
+    # Persist via tmpfiles.d biar tidak hilang lagi setelah reboot
+    echo "d /run/sshd 0755 root root -" > /etc/tmpfiles.d/sshd.conf
+
+    # Generate host keys kalau belum ada
+    [[ -f /etc/ssh/ssh_host_rsa_key ]] || ssh-keygen -A &>/dev/null
+
+    # Validasi config sebelum restart — kalau invalid, jangan restart (anti-lockout)
+    if sshd -t 2>/dev/null; then
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+        # Verifikasi service benar-benar up
+        sleep 1
+        if is_up ssh || is_up sshd; then
+            ok "OpenSSH siap: 2222 (Dropbear pegang port 22)"
+        else
+            warn "OpenSSH belum aktif — cek: journalctl -u ssh -n 20"
+        fi
+    else
+        err "sshd_config INVALID — tidak restart untuk mencegah lockout!"
+        sshd -t 2>&1 | sed 's/^/    /' | head -5
+    fi
 
     # ── Stunnel SSL ─────────────────────────────────────────────────────────
     # FIX: port 443 dihandle Nginx (TLS termination). Stunnel HANYA listen di 445 & 777.

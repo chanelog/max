@@ -110,18 +110,58 @@ sep
 MODE="auto"
 [[ "$1" == "--port22" ]] && MODE="port22"
 
+# ── FIX: Bebaskan port 2222 dari Dropbear/proses lain (kasus paling umum) ──
+# Bug klasik: Dropbear nyangkut di 2222 karena DROPBEAR_EXTRA_ARGS lama
+# berisi "-p 2222" → sshd tidak bisa bind. Ini wajib dijalankan SEBELUM
+# restart sshd.
+inf "Periksa port 2222 yang nyangkut..."
+PORT_USERS=$(ss -tlnp 2>/dev/null | awk '/:2222 /{print $NF}' | grep -oE '"[^"]+"' | tr -d '"' | sort -u | tr '\n' ' ')
+if [[ -n "$PORT_USERS" ]]; then
+    warn "Port 2222 sedang dipakai oleh: ${Y}${PORT_USERS}${N}"
+    if echo "$PORT_USERS" | grep -qi 'dropbear'; then
+        inf "Detect: Dropbear nyangkut di port 2222 — fix config..."
+        # Reset DROPBEAR_EXTRA_ARGS biar tidak nempel di 2222 lagi
+        if [[ -f /etc/default/dropbear ]]; then
+            sed -i '/^DROPBEAR_PORT=/d'        /etc/default/dropbear
+            sed -i '/^DROPBEAR_EXTRA_ARGS=/d'  /etc/default/dropbear
+            echo 'DROPBEAR_PORT=22'                  >> /etc/default/dropbear
+            echo 'DROPBEAR_EXTRA_ARGS="-p 143"'      >> /etc/default/dropbear
+        fi
+        systemctl stop dropbear 2>/dev/null
+    fi
+    # Kill apa pun yang masih nempel di 2222
+    if command -v fuser &>/dev/null; then
+        fuser -k 2222/tcp 2>/dev/null
+    elif command -v lsof &>/dev/null; then
+        lsof -ti :2222 -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null
+    fi
+    sleep 2
+    # Verifikasi sudah bebas
+    if ss -tlnp 2>/dev/null | grep -q ':2222 '; then
+        warn "Port 2222 masih ada yang nempel — coba kill paksa lagi"
+        ss -tlnp 2>/dev/null | grep ':2222 '
+    else
+        ok "Port 2222 sudah bebas"
+    fi
+else
+    ok "Port 2222 sudah kosong (OK)"
+fi
+
 if [[ "$MODE" == "port22" ]]; then
     inf "Mode: ${Y}FORCE PORT 22${N} (OpenSSH balik ke port klasik)"
 
     # Stop dropbear (yang nempel di port 22)
     inf "Stop Dropbear (release port 22)..."
     systemctl stop dropbear 2>/dev/null
+    sleep 1
+    if command -v fuser &>/dev/null; then
+        fuser -k 22/tcp 2>/dev/null
+    fi
 
-    # Update sshd_config: hapus Port 2222, set Port 22
+    # Update sshd_config: hapus baris Port apapun, set Port 22
     inf "Update sshd_config: Port 22..."
-    sed -i '/^Port[[:space:]]\+2222$/d'  /etc/ssh/sshd_config
-    sed -i '/^Port[[:space:]]\+22$/d'    /etc/ssh/sshd_config
-    sed -i '/^#Port/d'                   /etc/ssh/sshd_config
+    sed -i '/^[[:space:]]*#\?[[:space:]]*Port[[:space:]]\+[0-9]\+[[:space:]]*$/d' \
+        /etc/ssh/sshd_config
     echo "Port 22" >> /etc/ssh/sshd_config
 
     # Pastikan PermitRootLogin yes (biar bisa login)
@@ -139,15 +179,28 @@ if [[ "$MODE" == "port22" ]]; then
 else
     inf "Mode: ${G}AUTO-FIX${N} (pertahankan port 2222)"
 
-    # Pastikan port 2222 ada
-    if ! grep -qE '^Port[[:space:]]+2222$' /etc/ssh/sshd_config 2>/dev/null; then
-        inf "Tambahkan Port 2222 ke sshd_config..."
-        echo "Port 2222" >> /etc/ssh/sshd_config
-    fi
+    # Bersihkan baris Port lama (semua varian) — biar gak duplikat
+    sed -i '/^[[:space:]]*#\?[[:space:]]*Port[[:space:]]\+[0-9]\+[[:space:]]*$/d' \
+        /etc/ssh/sshd_config
+    echo "Port 2222" >> /etc/ssh/sshd_config
 
     # Pastikan PermitRootLogin & PasswordAuth on
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+    # Pastikan Dropbear config benar (port 22 + 143, bukan 2222)
+    if [[ -f /etc/default/dropbear ]]; then
+        sed -i '/^DROPBEAR_PORT=/d'        /etc/default/dropbear
+        sed -i '/^DROPBEAR_EXTRA_ARGS=/d'  /etc/default/dropbear
+        echo 'DROPBEAR_PORT=22'                  >> /etc/default/dropbear
+        echo 'DROPBEAR_EXTRA_ARGS="-p 143"'      >> /etc/default/dropbear
+    fi
+fi
+
+# Pastikan host keys ada (sshd butuh ini untuk start)
+if ! ls /etc/ssh/ssh_host_*_key &>/dev/null; then
+    inf "Generate SSH host keys..."
+    ssh-keygen -A &>/dev/null
 fi
 
 # Buka firewall untuk port SSH (kalau iptables aktif)
@@ -177,26 +230,30 @@ else
     exit 1
 fi
 
-# Restart services
+# Restart services — urutan: Dropbear DULU, baru SSH
+# (Dropbear di-restart dulu supaya bind ke 22+143 → port 2222 dijamin
+# bebas saat sshd start)
 echo ""
 inf "Restart service..."
 
+# Dropbear duluan
+if systemctl restart dropbear 2>/dev/null; then
+    if [[ "$MODE" == "port22" ]]; then
+        ok "Dropbear di-restart (port 143)"
+    else
+        ok "Dropbear di-restart (port 22, 143)"
+    fi
+fi
+
+sleep 1
+
+# Lalu SSH (port 2222 atau 22)
 if systemctl restart ssh 2>/dev/null; then
     ok "ssh.service di-restart"
 elif systemctl restart sshd 2>/dev/null; then
     ok "sshd.service di-restart"
 else
-    err "Gagal restart SSH service"
-fi
-
-if [[ "$MODE" == "port22" ]]; then
-    if systemctl restart dropbear 2>/dev/null; then
-        ok "Dropbear di-restart (port 143)"
-    fi
-else
-    if systemctl restart dropbear 2>/dev/null; then
-        ok "Dropbear di-restart (port 22, 143)"
-    fi
+    err "Gagal restart SSH service — cek: journalctl -xeu ssh -n 30"
 fi
 
 # ═══════════════════════════════════════════════════════════════
