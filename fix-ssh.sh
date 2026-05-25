@@ -86,6 +86,18 @@ if sshd -t 2>/dev/null; then
 else
     err "Syntax sshd_config : ${R}INVALID${N}"
     sshd -t 2>&1 | sed 's/^/    /'
+
+    # Auto-fix: missing /run/sshd (sangat umum di Debian setelah reboot/update)
+    if sshd -t 2>&1 | grep -qi 'Missing privilege separation directory'; then
+        warn "Detected: /run/sshd hilang — auto-fix..."
+        mkdir -p /run/sshd
+        chmod 0755 /run/sshd
+        # Persist via tmpfiles.d biar tidak hilang lagi setelah reboot
+        echo "d /run/sshd 0755 root root -" > /etc/tmpfiles.d/sshd.conf
+        if sshd -t 2>/dev/null; then
+            ok "Sudah dibuat: /run/sshd (persist via tmpfiles.d)"
+        fi
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
