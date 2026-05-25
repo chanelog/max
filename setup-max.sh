@@ -3,19 +3,26 @@
 #   MAX PANEL — Premium VPS Tunneling Panel
 #   Creator : MAX Team
 #   Ketik   : menu-max  untuk membuka panel
-#   Support : Debian (all) & Ubuntu (all)
+#   Support : Debian/Ubuntu + turunannya (Kali, Mint, Pop!_OS, Armbian, dll)
 #   Repo    : https://github.com/chanelog/max
 # ════════════════════════════════════════════════════════════
 #
 #   Protokol terinstall:
-#     • OpenSSH (2222)               • Dropbear (22/143)
-#     • Stunnel SSL (443/445/777)  • SSH WebSocket (80/8880/2095/443/2096)
+#     • OpenSSH (2222)              • Dropbear (22, 143)
+#     • Stunnel SSL (445, 777)      • Nginx HTTP/TLS (80, 443, 8443)
+#     • SSH WebSocket via Nginx     → /ws-ssh (CDN-ready: 80, 443, 8880)
 #     • OpenVPN (TCP 1194 / UDP 2200)
-#     • Xray-core VMess/VLess/Trojan (80/443/8443) + Shadowsocks (8388)
-#     • Trojan-Go (2087)           • BadVPN UDPGW (7100/7200/7300)
-#     • Hysteria 2 (5300/7300/36712)
-#     • SlowDNS (53 / 5300)        • WireGuard (51820)
-#     • OHP (80/8080) — opsional
+#     • Xray VMess/VLess/Trojan WS+gRPC + Shadowsocks (8388)
+#     • Trojan-Go (2087)            • BadVPN UDPGW (7100/7200/7300)
+#     • Hysteria 2 (UDP 36712 + range 6000-19999)
+#     • SlowDNS (53 → 5300)         • WireGuard (UDP 51820)
+#     • OHP (8080) — opsional
+#
+#   Optimasi kernel (auto):
+#     • BBR + cake/fq_codel/fq qdisc (kernel >= 4.9)
+#     • TCP buffer 64MB (penting untuk SSHWS via CDN)
+#     • UDP buffer + connection tuning untuk Hysteria/UDPGW
+#     • ulimit nofile 1048576 (banyak concurrent user)
 #
 # ════════════════════════════════════════════════════════════
 
@@ -27,27 +34,39 @@ check_root() {
     fi
 }
 
-# ── CEK OS — HANYA DEBIAN & UBUNTU ─────────────────────────────────────────────────────────
+# ── CEK OS — Debian/Ubuntu + turunannya (via ID_LIKE) ─────────────────────────────────────────
+# Mendukung:
+#   • Debian native      → ID=debian
+#   • Ubuntu native      → ID=ubuntu
+#   • Turunan Debian     → ID_LIKE mengandung "debian" (Kali, MX, Devuan, Armbian, Raspbian)
+#   • Turunan Ubuntu     → ID_LIKE mengandung "ubuntu" (Mint, Pop!_OS, Elementary, Zorin)
 check_os() {
     if [[ ! -f /etc/os-release ]]; then
-        echo -e "\n\033[1;31m  ✘  OS tidak dikenali! Script ini hanya untuk Debian & Ubuntu.\033[0m\n"
+        echo -e "\n\033[1;31m  ✘  /etc/os-release tidak ditemukan — OS tidak dikenali!\033[0m\n"
         exit 1
     fi
     # shellcheck disable=SC1091
     source /etc/os-release 2>/dev/null
     local os_name os_like
-    os_name=$(echo "${ID}" | tr '[:upper:]' '[:lower:]')
+    os_name=$(echo "${ID:-}"      | tr '[:upper:]' '[:lower:]')
     os_like=$(echo "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')
 
-    if [[ "$os_name" != "debian" && "$os_name" != "ubuntu" ]] \
-       && [[ "$os_like" != *"debian"* && "$os_like" != *"ubuntu"* ]]; then
+    local supported=0
+    [[ "$os_name" == "debian" || "$os_name" == "ubuntu" ]] && supported=1
+    [[ "$os_like" == *"debian"* || "$os_like" == *"ubuntu"* ]] && supported=1
+
+    if [[ "$supported" != "1" ]]; then
         echo ""
         echo -e "\033[1;31m  ─────────────────────────────────────────────────────────\033[0m"
         echo -e "  ✘  OS TIDAK DIDUKUNG!"
         echo -e "  OS kamu : \033[1;33m${PRETTY_NAME:-$ID}\033[0m"
-        echo -e "  Script ini hanya mendukung:"
-        echo -e "  \033[1;32m✔\033[0m  Debian (semua versi)"
-        echo -e "  \033[1;32m✔\033[0m  Ubuntu (semua versi)"
+        echo -e "  ID      : \033[2m${ID:-?} (LIKE: ${ID_LIKE:-none})\033[0m"
+        echo ""
+        echo -e "  Script ini hanya mendukung Debian/Ubuntu family:"
+        echo -e "  \033[1;32m✔\033[0m  Debian (semua versi) + turunannya"
+        echo -e "      (Kali, MX Linux, Devuan, Armbian, Raspbian)"
+        echo -e "  \033[1;32m✔\033[0m  Ubuntu (semua versi) + turunannya"
+        echo -e "      (Linux Mint, Pop!_OS, Elementary, Zorin OS)"
         echo -e "\033[1;31m  ─────────────────────────────────────────────────────────\033[0m"
         echo ""
         exit 1
@@ -55,7 +74,16 @@ check_os() {
 
     OS_NAME="${PRETTY_NAME:-$ID $VERSION_ID}"
     OS_ID="$os_name"
-    export OS_NAME OS_ID
+    OS_LIKE="$os_like"
+    # Tag turunan untuk info user (opsional, tidak mengubah behavior)
+    if [[ "$os_name" != "debian" && "$os_name" != "ubuntu" ]]; then
+        if [[ "$os_like" == *"ubuntu"* ]]; then
+            OS_NAME="${OS_NAME} (Ubuntu-based)"
+        elif [[ "$os_like" == *"debian"* ]]; then
+            OS_NAME="${OS_NAME} (Debian-based)"
+        fi
+    fi
+    export OS_NAME OS_ID OS_LIKE
 }
 
 # ════════════════════════════════════════════════════════════
@@ -2218,20 +2246,97 @@ gen_selfsigned_ssl() {
 }
 
 # ── BBR silent (panggil dari installer) ─────────────────────────────────────────────────────────
+# Mengaktifkan BBR + tuning kernel TCP/UDP yang dioptimalkan untuk:
+#   • SSH WebSocket (SSHWS) lewat CDN (Cloudflare, dll)
+#   • Throughput tinggi banyak koneksi paralel
+#   • Latency rendah & buffer-bloat minimal (fq/cake qdisc)
+# Catatan:
+#   • Memerlukan kernel >= 4.9 (BBR). Semua Debian 10+/Ubuntu 18.04+ aman.
+#   • Idempotent (aman dijalankan berulang kali).
 enable_bbr_silent() {
+    # Cek versi kernel — BBR butuh >= 4.9
+    local krn_major krn_minor
+    krn_major=$(uname -r | awk -F. '{print $1}')
+    krn_minor=$(uname -r | awk -F. '{print $2}')
+    if (( krn_major < 4 )) || { (( krn_major == 4 )) && (( krn_minor < 9 )); }; then
+        # Kernel terlalu lama — skip BBR, hanya buffer tuning
+        _apply_block "TCP-BUFFER" /etc/sysctl.conf <<'BUF1'
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.ip_forward=1
+BUF1
+        sysctl -p &>/dev/null
+        return 0
+    fi
+
     modprobe tcp_bbr 2>/dev/null
     # FIX: pakai marker idempotent (re-run aman, tidak duplikat baris)
     _apply_block "BBR-MODULE" /etc/modules-load.d/maxpanel.conf <<'BBRMOD'
 tcp_bbr
 BBRMOD
-    sysctl -w net.core.default_qdisc=fq           &>/dev/null
-    sysctl -w net.ipv4.tcp_congestion_control=bbr &>/dev/null
-    _apply_block "BBR-SYSCTL" /etc/sysctl.conf <<'BBRSYS'
-net.core.default_qdisc=fq
+
+    # Pilih qdisc terbaik: cake > fq_codel > fq (fallback)
+    local qdisc="fq"
+    if modinfo sch_cake &>/dev/null; then qdisc="cake"
+    elif modinfo sch_fq_codel &>/dev/null; then qdisc="fq_codel"
+    fi
+
+    sysctl -w net.core.default_qdisc="$qdisc"      &>/dev/null
+    sysctl -w net.ipv4.tcp_congestion_control=bbr  &>/dev/null
+
+    # Tulis tuning lengkap (idempotent via marker)
+    _apply_block "MAX-SSHWS-TUNING" /etc/sysctl.conf <<EOF_TUNE
+# ── BBR + qdisc ──
+net.core.default_qdisc=$qdisc
 net.ipv4.tcp_congestion_control=bbr
+
+# ── Forwarding ──
 net.ipv4.ip_forward=1
-BBRSYS
+
+# ── TCP buffer (penting untuk SSHWS via CDN) ──
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.core.rmem_default=2097152
+net.core.wmem_default=2097152
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+
+# ── UDP buffer (Hysteria/SlowDNS/UDPGW) ──
+net.ipv4.udp_rmem_min=8192
+net.ipv4.udp_wmem_min=8192
+
+# ── Backlog & connection tuning ──
+net.core.netdev_max_backlog=32768
+net.core.somaxconn=65535
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.tcp_syncookies=1
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_keepalive_time=300
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=5
+net.ipv4.tcp_max_tw_buckets=2000000
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_no_metrics_save=1
+
+# ── Local port range (lebih banyak koneksi outbound) ──
+net.ipv4.ip_local_port_range=10240 65535
+
+# ── File descriptor ──
+fs.file-max=2097152
+EOF_TUNE
     sysctl -p &>/dev/null
+
+    # Naikkan ulimit untuk service (SSH, ws-proxy, ohpserver)
+    _apply_block "MAX-LIMITS" /etc/security/limits.conf <<'LIM'
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+LIM
+    return 0
 }
 
 # ════════════════════════════════════════════════════════════
