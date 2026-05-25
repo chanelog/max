@@ -4346,55 +4346,406 @@ do_restore_tg() {
 }
 
 # ════════════════════════════════════════════════════════════
-#  UPDATE SCRIPT
+#  UPDATE SYSTEM — Submenu lengkap
+#  Fitur:
+#   [1] Cek versi terbaru
+#   [2] Update otomatis (script + binary + service restart)
+#   [3] Update script saja (max-menu)
+#   [4] Re-download semua binary (force)
+#   [5] Verifikasi integritas (size check)
+#   [6] Lihat changelog
+#   [7] Rollback ke versi sebelumnya
 # ════════════════════════════════════════════════════════════
-cek_update() {
+
+# Direktori backup khusus update (max 3 versi history)
+UPDATE_BACKUP_DIR="/var/backups/maxpanel-update"
+CHANGELOG_URL="https://raw.githubusercontent.com/chanelog/max/main/CHANGELOG.md"
+
+# ── Tabel binary terpasang ──────────────────────────────────
+# Format: "label|url|dest|minsize|mode|service"
+#   service: kosong = tidak restart service apa pun
+_update_binary_table() {
+    cat <<TABLE
+xray|${XRAY_URL}|${XRAY_BIN}|1000000|755|xray
+hysteria|${HYSTERIA_URL}|${HY_BIN}|1000000|755|hysteria-server
+trojan-go|${TROJAN_GO_URL}|${TROJANGO_BIN}|1000000|755|trojan-go
+udpgw|${UDPGW_URL}|${UDPGW_BIN}|50000|755|badvpn-udpgw7100
+sldns-server|${SLOWDNS_URL}|${SLOW_BIN}|100000|755|slowdns
+ohpserver|${OHP_URL}|${OHP_BIN}|100000|755|ohp
+ws|${WS_URL}|${WS_BIN}|50000|755|ws
+ws.service|${WS_SERVICE_URL}|/etc/systemd/system/ws.service|50|644|
+TABLE
+}
+
+# ── Helper: cek versi remote ────────────────────────────────
+_get_remote_version() {
+    local v
+    v=$(curl -s --max-time 15 "$VERSION_URL" 2>/dev/null | tr -d '[:space:]')
+    [[ -z "$v" ]] && v=$(wget -qO- --timeout=15 "$VERSION_URL" 2>/dev/null | tr -d '[:space:]')
+    echo "$v"
+}
+
+# ── Helper: backup file sebelum overwrite ───────────────────
+_update_backup() {
+    local src="$1" tag="$2"
+    [[ ! -f "$src" ]] && return 0
+    local stamp; stamp=$(date +%Y%m%d-%H%M%S)
+    local bdir="$UPDATE_BACKUP_DIR/$tag-$stamp"
+    mkdir -p "$bdir"
+    cp -a "$src" "$bdir/" 2>/dev/null
+    # Rotasi: simpan max 3 backup per tag
+    ls -1dt "$UPDATE_BACKUP_DIR"/${tag}-* 2>/dev/null | tail -n +4 | xargs -r rm -rf
+    echo "$bdir/$(basename "$src")"
+}
+
+# ── [1] Cek versi terbaru ───────────────────────────────────
+update_check_version() {
     show_header
-    _top; _btn "  ${IT}${AL}🔄  CEK UPDATE MAX PANEL${NC}"; _bot; echo ""
-    local cur="$SCRIPT_VERSION" remote
-    printf "  ${DIM}Versi sekarang :${NC} ${W}%s${NC}\n" "$cur"
-    inf "Mengecek versi terbaru..."
-    remote=$(curl -s --max-time 15 "$VERSION_URL" 2>/dev/null | tr -d '[:space:]')
-    [[ -z "$remote" ]] && remote=$(wget -qO- --timeout=15 "$VERSION_URL" 2>/dev/null | tr -d '[:space:]')
+    _top; _btn "  ${IT}${AL}🔍  CEK VERSI TERBARU${NC}"; _bot; echo ""
+    printf "  ${DIM}Versi terpasang :${NC} ${W}%s${NC}\n" "$SCRIPT_VERSION"
+    inf "Mengecek versi remote..."
+    local remote; remote=$(_get_remote_version)
+    if [[ -z "$remote" ]]; then
+        err "Gagal hubungi server update."; pause; return
+    fi
+    printf "  ${DIM}Versi remote    :${NC} ${LG}%s${NC}\n" "$remote"
+    echo ""
+    if [[ "$remote" == "$SCRIPT_VERSION" ]]; then
+        ok "Sudah versi terbaru."
+    else
+        echo -e "  ${A4}⚡ Update tersedia: ${Y}${SCRIPT_VERSION}${NC} → ${LG}${remote}${NC}"
+        echo -e "  ${DIM}Pilih [2] untuk update otomatis.${NC}"
+    fi
+    pause
+}
+
+# ── [2] Update otomatis (full) ──────────────────────────────
+update_auto_full() {
+    show_header
+    _top; _btn "  ${IT}${AL}⚡  UPDATE OTOMATIS (SCRIPT + BINARY)${NC}"; _bot; echo ""
+
+    local remote; remote=$(_get_remote_version)
     if [[ -z "$remote" ]]; then
         err "Gagal cek versi remote."; pause; return
     fi
-    printf "  ${DIM}Versi remote  :${NC} ${LG}%s${NC}\n" "$remote"; echo ""
-
-    if [[ "$remote" == "$cur" ]]; then
-        ok "Sudah versi terbaru."
+    printf "  ${DIM}Sekarang :${NC} ${W}%s${NC}    ${DIM}Remote :${NC} ${LG}%s${NC}\n" "$SCRIPT_VERSION" "$remote"
+    echo ""
+    if [[ "$remote" == "$SCRIPT_VERSION" ]]; then
+        ok "Sudah versi terbaru — tidak ada yang di-update."
         pause; return
     fi
-    echo -e "  ${A4}⚡ Update tersedia: ${Y}${cur}${NC} → ${LG}${remote}${NC}"
-    echo -ne "  ${A3}Update sekarang? [y/N]${NC}: "; read -r y
+    warn "Update akan: replace script utama + re-download binary baru/berubah."
+    echo -ne "  ${A3}Lanjutkan? [y/N]${NC}: "; read -r y
     [[ "${y,,}" != "y" ]] && { inf "Dibatalkan"; pause; return; }
-    do_update_script
-}
 
-do_update_script() {
+    mkdir -p "$UPDATE_BACKUP_DIR" /var/log/maxpanel
+    local logf="/var/log/maxpanel/update-$(date +%Y%m%d-%H%M%S).log"
+    : > "$logf"
+
+    # ── 1) Update binary (yang baru / berubah) ────────────
+    inf "Memproses binary..."
+    local total=0 updated=0 added=0 failed=0
+    while IFS='|' read -r label url dest minsize mode svc; do
+        [[ -z "$label" ]] && continue
+        ((total++))
+        local exist=0; [[ -f "$dest" ]] && exist=1
+        local tmp; tmp=$(mktemp /tmp/upd-XXXXXX)
+        if dl "$url" "$tmp"; then
+            local newsize oldsize=0
+            newsize=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
+            [[ "$exist" -eq 1 ]] && oldsize=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+            if [[ "$newsize" -lt "$minsize" ]]; then
+                err "  ${label}: file terlalu kecil (${newsize}B), skip"
+                rm -f "$tmp"; ((failed++)); continue
+            fi
+            # Cek apakah berubah (size berbeda) atau file baru
+            if [[ "$exist" -eq 0 ]]; then
+                _update_backup "$dest" "bin-$label" >/dev/null
+                install -m"$mode" "$tmp" "$dest"
+                ok "  ${LG}+ NEW${NC} ${label} (${newsize}B) → ${dest}"
+                ((added++))
+            elif [[ "$newsize" != "$oldsize" ]]; then
+                _update_backup "$dest" "bin-$label" >/dev/null
+                install -m"$mode" "$tmp" "$dest"
+                ok "  ${A4}~ UPD${NC} ${label} (${oldsize}B → ${newsize}B)"
+                ((updated++))
+                # Restart service yang terdampak
+                if [[ -n "$svc" ]] && systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\."; then
+                    systemctl restart "$svc" 2>>"$logf" && echo "    ↻ ${svc} restarted" || warn "    ${svc} restart gagal"
+                fi
+            else
+                # Sama persis — skip
+                echo -e "  ${DIM}= SAME${NC} ${label}"
+            fi
+            rm -f "$tmp"
+        else
+            err "  ${label}: download gagal"
+            rm -f "$tmp"; ((failed++))
+        fi
+    done < <(_update_binary_table)
+
+    echo ""
+    printf "  ${DIM}Total: %d  •  Baru: ${LG}%d${NC}  •  Update: ${A4}%d${NC}  •  Gagal: ${LR}%d${NC}\n" \
+        "$total" "$added" "$updated" "$failed"
+    echo ""
+
+    # ── 2) systemd reload kalau ada .service di-update ────
+    systemctl daemon-reload 2>/dev/null
+
+    # ── 3) Update script utama (paling akhir, karena akan exec) ──
+    inf "Update script utama (max-menu)..."
     local tmp; tmp=$(mktemp /tmp/max-update-XXXXXX.sh)
     if dl "$SCRIPT_URL" "$tmp"; then
         if bash -n "$tmp"; then
+            _update_backup "/usr/local/bin/max-menu" "max-menu" >/dev/null
             install -m755 "$tmp" /usr/local/bin/max-menu
             ln -sf /usr/local/bin/max-menu /usr/local/bin/menu-max
-            ok "Update sukses → restart panel..."
+            echo "$remote" > "$VERSIONF" 2>/dev/null
             rm -f "$tmp"
-            pause
+            ok "Script ter-update ke versi ${LG}${remote}${NC}"
+            _tg_send "✅ <b>MAX PANEL Update Selesai</b>
+Versi: <code>${SCRIPT_VERSION}</code> → <code>${remote}</code>
+Binary baru: <code>${added}</code>  •  Update: <code>${updated}</code>  •  Gagal: <code>${failed}</code>" 2>/dev/null
+            echo ""
+            inf "Reload panel dalam 2 detik..."
+            sleep 2
             exec bash /usr/local/bin/max-menu
         else
-            err "File update korup"; rm -f "$tmp"; pause
+            err "Script remote korup (syntax error) — script lama TIDAK diganti."
+            rm -f "$tmp"
         fi
     else
-        err "Download gagal"; rm -f "$tmp"; pause
+        err "Download script gagal."
+        rm -f "$tmp"
+    fi
+    pause
+}
+
+# ── [3] Update script saja ──────────────────────────────────
+update_script_only() {
+    show_header
+    _top; _btn "  ${IT}${AL}📜  UPDATE SCRIPT SAJA${NC}"; _bot; echo ""
+    inf "Download setup-max.sh dari repo..."
+    local tmp; tmp=$(mktemp /tmp/max-update-XXXXXX.sh)
+    if dl "$SCRIPT_URL" "$tmp"; then
+        if bash -n "$tmp"; then
+            _update_backup "/usr/local/bin/max-menu" "max-menu" >/dev/null
+            install -m755 "$tmp" /usr/local/bin/max-menu
+            ln -sf /usr/local/bin/max-menu /usr/local/bin/menu-max
+            local remote; remote=$(_get_remote_version)
+            [[ -n "$remote" ]] && echo "$remote" > "$VERSIONF"
+            rm -f "$tmp"
+            ok "Script ter-update — reload panel..."
+            sleep 1
+            exec bash /usr/local/bin/max-menu
+        else
+            err "Script remote korup (syntax error)"
+            rm -f "$tmp"; pause
+        fi
+    else
+        err "Download gagal"
+        rm -f "$tmp"; pause
     fi
 }
+
+# ── [4] Re-download semua binary (force) ────────────────────
+update_redownload_binaries() {
+    show_header
+    _top; _btn "  ${IT}${AL}📦  RE-DOWNLOAD SEMUA BINARY (FORCE)${NC}"; _bot; echo ""
+    warn "Akan men-download ulang SEMUA binary (xray, hysteria, ws, dll)."
+    echo -ne "  ${A3}Lanjutkan? [y/N]${NC}: "; read -r y
+    [[ "${y,,}" != "y" ]] && { inf "Dibatalkan"; pause; return; }
+
+    mkdir -p "$UPDATE_BACKUP_DIR"
+    local total=0 ok_n=0 fail=0
+    while IFS='|' read -r label url dest minsize mode svc; do
+        [[ -z "$label" ]] && continue
+        ((total++))
+        local tmp; tmp=$(mktemp /tmp/upd-XXXXXX)
+        if dl "$url" "$tmp"; then
+            local sz; sz=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
+            if [[ "$sz" -lt "$minsize" ]]; then
+                err "  ${label}: ukuran tidak valid (${sz}B)"
+                rm -f "$tmp"; ((fail++)); continue
+            fi
+            _update_backup "$dest" "bin-$label" >/dev/null
+            install -m"$mode" "$tmp" "$dest"
+            rm -f "$tmp"
+            ok "  ${label} (${sz}B) → ${dest}"
+            ((ok_n++))
+            if [[ -n "$svc" ]] && systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\."; then
+                systemctl restart "$svc" 2>/dev/null && echo -e "    ${DIM}↻ ${svc} restarted${NC}"
+            fi
+        else
+            err "  ${label}: download gagal"
+            rm -f "$tmp"; ((fail++))
+        fi
+    done < <(_update_binary_table)
+
+    systemctl daemon-reload 2>/dev/null
+    echo ""
+    printf "  ${DIM}Total: %d  •  Sukses: ${LG}%d${NC}  •  Gagal: ${LR}%d${NC}\n" "$total" "$ok_n" "$fail"
+    pause
+}
+
+# ── [5] Verifikasi integritas (size check) ──────────────────
+update_verify_integrity() {
+    show_header
+    _top; _btn "  ${IT}${AL}🩺  VERIFIKASI INTEGRITAS BINARY${NC}"; _bot; echo ""
+    printf "  ${DIM}%-15s %-40s %12s %s${NC}\n" "BINARY" "PATH" "SIZE" "STATUS"
+    _sep
+    local issues=0
+    while IFS='|' read -r label url dest minsize mode svc; do
+        [[ -z "$label" ]] && continue
+        local status size="-"
+        if [[ ! -f "$dest" ]]; then
+            status="${LR}MISSING${NC}"; ((issues++))
+        else
+            size=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+            if [[ "$size" -lt "$minsize" ]]; then
+                status="${LR}TOO SMALL${NC}"; ((issues++))
+            elif [[ ! -x "$dest" && "$mode" == "755" ]]; then
+                status="${Y}NOT EXEC${NC}"; ((issues++))
+            else
+                status="${LG}OK${NC}"
+            fi
+        fi
+        printf "  %-15s %-40s %12s %b\n" "$label" "$dest" "$size" "$status"
+    done < <(_update_binary_table)
+    _sep
+    echo ""
+    if [[ "$issues" -eq 0 ]]; then
+        ok "Semua binary OK."
+    else
+        warn "Ditemukan ${issues} masalah — pakai opsi [4] untuk re-download."
+    fi
+    pause
+}
+
+# ── [6] Lihat changelog ─────────────────────────────────────
+update_view_changelog() {
+    show_header
+    _top; _btn "  ${IT}${AL}📋  CHANGELOG${NC}"; _bot; echo ""
+    local tmp; tmp=$(mktemp /tmp/changelog-XXXXXX.md)
+    if dl "$CHANGELOG_URL" "$tmp"; then
+        # Tampilkan max 80 baris pertama
+        head -80 "$tmp" | sed -e 's/^# /\n/' -e 's/^## /\n  → /' -e 's/^- /    • /'
+        local lines; lines=$(wc -l < "$tmp")
+        [[ "$lines" -gt 80 ]] && echo -e "\n  ${DIM}... ($((lines-80)) baris lagi — lihat di GitHub)${NC}"
+        rm -f "$tmp"
+    else
+        warn "CHANGELOG.md belum tersedia di repo."
+        echo -e "  ${DIM}URL: ${CHANGELOG_URL}${NC}"
+        rm -f "$tmp"
+    fi
+    pause
+}
+
+# ── [7] Rollback ke versi sebelumnya ────────────────────────
+update_rollback() {
+    show_header
+    _top; _btn "  ${IT}${AL}🔄  ROLLBACK${NC}"; _bot; echo ""
+    if [[ ! -d "$UPDATE_BACKUP_DIR" ]]; then
+        warn "Belum ada backup update."
+        pause; return
+    fi
+    mapfile -t backups < <(ls -1dt "$UPDATE_BACKUP_DIR"/* 2>/dev/null)
+    if [[ "${#backups[@]}" -eq 0 ]]; then
+        warn "Belum ada backup update."
+        pause; return
+    fi
+    echo -e "  ${DIM}Backup tersedia:${NC}"
+    _sep
+    local i=1
+    for b in "${backups[@]}"; do
+        printf "  ${A1}%2d${NC}  %s\n" "$i" "$(basename "$b")"
+        ((i++))
+        [[ "$i" -gt 20 ]] && break
+    done
+    _sep
+    echo ""
+    echo -ne "  ${A3}Nomor backup${NC} (0=batal): "; read -r n
+    [[ ! "$n" =~ ^[0-9]+$ || "$n" -eq 0 ]] && { inf "Dibatalkan"; pause; return; }
+    [[ "$n" -lt 1 || "$n" -gt "${#backups[@]}" ]] && { err "Nomor invalid"; pause; return; }
+
+    local sel="${backups[$((n-1))]}"
+    local tag; tag=$(basename "$sel" | sed 's/-[0-9]\{8\}-[0-9]\{6\}$//')
+    local file; file=$(ls -1 "$sel" | head -1)
+    [[ -z "$file" ]] && { err "Backup kosong"; pause; return; }
+
+    # Tentukan tujuan restore
+    local dest=""
+    case "$tag" in
+        max-menu) dest="/usr/local/bin/max-menu" ;;
+        bin-*)
+            local label="${tag#bin-}"
+            dest=$(_update_binary_table | awk -F'|' -v l="$label" '$1==l {print $3; exit}')
+            ;;
+    esac
+    if [[ -z "$dest" ]]; then
+        err "Tujuan restore tidak dikenali untuk tag: $tag"
+        pause; return
+    fi
+
+    warn "Akan restore ${W}${file}${NC} → ${dest}"
+    echo -ne "  ${A3}Ketik ${LR}YES${A3} untuk konfirmasi${NC}: "; read -r cf
+    [[ "$cf" != "YES" ]] && { inf "Dibatalkan"; pause; return; }
+
+    cp -a "$sel/$file" "$dest"
+    [[ "$dest" == /usr/local/bin/* ]] && chmod 755 "$dest"
+    [[ "$dest" == /etc/systemd/system/*.service ]] && { chmod 644 "$dest"; systemctl daemon-reload; }
+    ok "Rollback selesai → ${dest}"
+
+    if [[ "$dest" == "/usr/local/bin/max-menu" ]]; then
+        inf "Reload panel..."
+        sleep 1
+        exec bash /usr/local/bin/max-menu
+    fi
+    pause
+}
+
+# ── Menu utama update (dispatcher) ──────────────────────────
+cek_update() {
+    while true; do
+        show_header
+        _top; _btn "  ${IT}${AL}🔄  UPDATE MAX PANEL${NC}"; _bot; echo ""
+        printf "  ${DIM}Versi terpasang :${NC} ${W}%s${NC}\n" "$SCRIPT_VERSION"
+        echo ""
+        echo -e "   ${A1}1${NC}  🔍  Cek versi terbaru"
+        echo -e "   ${A1}2${NC}  ⚡  Update otomatis ${DIM}(script + binary)${NC}"
+        echo -e "   ${A1}3${NC}  📜  Update script saja"
+        echo -e "   ${A1}4${NC}  📦  Re-download semua binary ${DIM}(force)${NC}"
+        echo -e "   ${A1}5${NC}  🩺  Verifikasi integritas binary"
+        echo -e "   ${A1}6${NC}  📋  Lihat changelog"
+        echo -e "   ${A1}7${NC}  🔄  Rollback ke versi sebelumnya"
+        echo ""
+        echo -e "   ${A1}0${NC}  ◀   Kembali"
+        echo ""
+        echo -ne "  ${A3}Pilih${NC} [0-7]: "; read -r u
+        case "$u" in
+            1) update_check_version ;;
+            2) update_auto_full ;;
+            3) update_script_only ;;
+            4) update_redownload_binaries ;;
+            5) update_verify_integrity ;;
+            6) update_view_changelog ;;
+            7) update_rollback ;;
+            0) return ;;
+            *) ;;
+        esac
+    done
+}
+
+# Dipertahankan untuk backward compat (cron + flag --update lama)
+do_update_script() { update_script_only; }
 
 check_update_silent() {
     local remote; remote=$(curl -s --max-time 10 "$VERSION_URL" 2>/dev/null | tr -d '[:space:]')
     [[ -z "$remote" ]] && return
     if [[ "$remote" != "$SCRIPT_VERSION" ]]; then
         _tg_send "🔔 <b>MAX PANEL Update Tersedia</b>
-Versi: <code>${SCRIPT_VERSION}</code> → <code>${remote}</code>"
+Versi: <code>${SCRIPT_VERSION}</code> → <code>${remote}</code>
+Buka <code>menu-max</code> → ${LR}[12]${NC} Update → ${LG}[2]${NC} Update otomatis"
         echo "[$(date)] update tersedia: $remote"
     fi
 }
