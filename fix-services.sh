@@ -145,6 +145,50 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────
+# 9. Squid Proxy (SQ) — port 80, 8000, 3128
+# ────────────────────────────────────────────────────────────
+inf "Mengecek Squid Proxy (SQ)..."
+if ! command -v squid &>/dev/null; then
+    inf "Squid belum terinstall, menginstall..."
+    apt-get install -y squid -qq 2>/dev/null && ok "Squid terinstall"
+fi
+if [[ -f /etc/squid/squid.conf ]]; then
+    # Pastikan port 80 tidak dipegang process lain (mis. apache2)
+    if systemctl is-active --quiet apache2 2>/dev/null; then
+        warn "Apache2 aktif di port 80 — stop & disable"
+        systemctl stop apache2 2>/dev/null
+        systemctl disable apache2 2>/dev/null
+    fi
+    fix_svc squid "Squid Proxy (SQ)"
+else
+    warn "Squid: /etc/squid/squid.conf belum ada — jalankan installer panel dulu"
+fi
+
+# ────────────────────────────────────────────────────────────
+# 10. WS-epro (SSH WebSocket)
+# ────────────────────────────────────────────────────────────
+inf "Mengecek WS-epro (SSH WebSocket)..."
+if [[ -x /usr/bin/ws && -f /usr/bin/tun.conf ]]; then
+    fix_svc ws "WS-epro (SSH WebSocket)"
+else
+    warn "ws.service: binary atau tun.conf belum ada — jalankan installer panel dulu"
+fi
+
+# ────────────────────────────────────────────────────────────
+# 11. Nginx (reverse-proxy 81/443/8443/8880)
+# ────────────────────────────────────────────────────────────
+inf "Mengecek Nginx (reverse-proxy)..."
+if ! command -v nginx &>/dev/null; then
+    inf "Nginx belum terinstall, menginstall..."
+    apt-get install -y nginx -qq 2>/dev/null && ok "Nginx terinstall"
+fi
+if [[ -f /etc/nginx/conf.d/xray.conf ]]; then
+    fix_svc nginx "Nginx (reverse-proxy)"
+else
+    warn "Nginx: config xray.conf belum ada — jalankan installer panel dulu"
+fi
+
+# ────────────────────────────────────────────────────────────
 # Reload daemon & ringkasan
 # ────────────────────────────────────────────────────────────
 echo ""
@@ -154,8 +198,8 @@ echo -e "  ${BOLD}  Status Akhir${NC}"
 echo -e "  ${CYAN}══════════════════════════════════════════════${NC}"
 echo ""
 
-services=(ssh dropbear stunnel4 xray trojan-go hysteria-server openvpn "wg-quick@wg0")
-labels=(SSH DR STN XRY TGO HY OVPN WG)
+services=(ssh dropbear stunnel4 xray trojan-go hysteria-server openvpn "wg-quick@wg0" squid ws nginx)
+labels=(SSH DR STN XRY TGO HY OVPN WG SQ WS NGX)
 
 for i in "${!services[@]}"; do
     svc="${services[$i]}"
