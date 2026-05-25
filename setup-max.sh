@@ -139,7 +139,8 @@ SLOW_BIN="/usr/local/bin/sldns-server"
 
 UDPGW_BIN="/usr/local/bin/badvpn-udpgw"
 WS_DIR="/etc/maxpanel/ws"
-WS_BIN="/usr/local/bin/ws-max"
+WS_BIN="/usr/bin/ws"
+TUN_CONF="/usr/bin/tun.conf"
 OHP_BIN="/usr/local/bin/ohpserver"
 
 # URLs binary
@@ -149,6 +150,8 @@ TROJAN_GO_URL="https://github.com/chanelog/max/releases/download/bin/trojan-go-l
 UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
 SLOWDNS_URL="https://github.com/chanelog/max/raw/main/sldns-server"
 OHP_URL="https://github.com/chanelog/max/raw/main/ohpserver"
+WS_URL="https://raw.githubusercontent.com/chanelog/max/main/ws"
+WS_SERVICE_URL="https://raw.githubusercontent.com/chanelog/max/main/ws.service"
 
 SCRIPT_VERSION="1.2"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
@@ -1702,126 +1705,20 @@ SLDEOF
 }
 
 # ════════════════════════════════════════════════════════════
-#  INSTALLER — WebSocket Python Proxy
+#  INSTALLER — WebSocket (ws-epro) | jaka1m binary
 # ════════════════════════════════════════════════════════════
+# FIX: Python ws-proxy diganti dengan binary Go `ws` (ws-epro v1.2.1) +
+#      service `ws.service` dari repo chanelog/max. Listen di
+#      127.0.0.1:8881 → Dropbear:22 (port sama → kompatibel dgn Nginx /ws-ssh).
 install_ws_proxy() {
-    inf "Install WebSocket proxy (HTTP injector)..."
+    inf "Install WebSocket binary (ws-epro)..."
     mkdir -p "$WS_DIR"
 
-    # Tulis python ws-proxy minimal
-    cat > "$WS_BIN" <<'WSPY'
-#!/usr/bin/env python3
-# MAX WS Proxy — HTTP CONNECT/Injector style proxy
-# Listens on 127.0.0.1:<port>, accepts HTTP upgrade, forwards raw TCP to SSH/Dropbear backend.
-# Dipakai sebagai backend untuk Nginx (path /ws-ssh). Listen di 127.0.0.1:8881 (internal).
-import socket, threading, select, sys, signal
-
-LISTEN_HOST = '127.0.0.1'
-LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8880
-TARGET_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 22
-DEFAULT_TARGET = ('127.0.0.1', TARGET_PORT)
-RESPONSE = b'HTTP/1.1 200 OK\r\nServer: MAX-WS\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'
-BUFLEN  = 8192
-TIMEOUT = 60
-
-class Server(threading.Thread):
-    def __init__(self, host, port):
-        super().__init__(daemon=True)
-        self.host = host; self.port = port
-        self.threads = []
-        self.running = True
-        self.sock = None
-
-    def run(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((self.host, self.port))
-        self.sock.listen(0)
-        while self.running:
-            try:
-                c, _ = self.sock.accept()
-                c.setblocking(True)
-            except OSError:
-                break
-            ch = ConnectionHandler(c, DEFAULT_TARGET)
-            ch.start()
-            self.threads.append(ch)
-        self.sock.close()
-
-    def stop(self):
-        self.running = False
-        try: self.sock.close()
-        except: pass
-
-class ConnectionHandler(threading.Thread):
-    def __init__(self, client, target):
-        super().__init__(daemon=True)
-        self.client = client; self.target = target
-        self.target_sock = None
-
-    def run(self):
-        try:
-            self.client.settimeout(TIMEOUT)
-            data = self.client.recv(BUFLEN)
-            host_port = self.target
-            self.client.sendall(RESPONSE)
-            self.target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.target_sock.settimeout(TIMEOUT)
-            self.target_sock.connect(host_port)
-            self.relay(self.client, self.target_sock)
-        except Exception:
-            pass
-        finally:
-            try: self.client.close()
-            except: pass
-            try:
-                if self.target_sock: self.target_sock.close()
-            except: pass
-
-    def relay(self, a, b):
-        sockets = [a, b]
-        timeout_count = 0
-        while True:
-            r, _, x = select.select(sockets, [], sockets, 3)
-            if x:
-                break
-            if r:
-                for s in r:
-                    try:
-                        data = s.recv(BUFLEN)
-                    except Exception:
-                        return
-                    if not data:
-                        return
-                    other = b if s is a else a
-                    try:
-                        other.sendall(data)
-                    except Exception:
-                        return
-                    timeout_count = 0
-            else:
-                timeout_count += 1
-                if timeout_count > 5:
-                    return
-
-def main():
-    s = Server(LISTEN_HOST, LISTEN_PORT)
-    s.start()
-    def sigterm(*_):
-        s.stop()
-    signal.signal(signal.SIGTERM, sigterm)
-    signal.signal(signal.SIGINT,  sigterm)
-    s.join()
-
-if __name__ == '__main__':
-    main()
-WSPY
-    chmod +x "$WS_BIN"
-
-    # Systemd: HANYA satu WS proxy di 127.0.0.1:8880 (akan di-reverse-proxy oleh Nginx via /ws-ssh)
-    # FIX: hapus listener pada port 80 dan 2095 (clash dengan Nginx + public exposure tanpa Nginx).
-    # Sekaligus hapus service lama (ws-max-80, ws-max-2095) bila ada sisa install sebelumnya.
-    for stale in /etc/systemd/system/ws-max-80.service /etc/systemd/system/ws-max-2095.service; do
+    # --- Cleanup legacy install (idempotent) ---------------------------------
+    # 1) Service lama berbasis Python (ws-max-*) — stop & purge
+    for stale in /etc/systemd/system/ws-max-80.service \
+                 /etc/systemd/system/ws-max-2095.service \
+                 /etc/systemd/system/ws-max-8881.service; do
         if [[ -f "$stale" ]]; then
             local svc; svc=$(basename "$stale" .service)
             systemctl stop    "$svc" 2>/dev/null
@@ -1829,40 +1726,81 @@ WSPY
             rm -f "$stale"
         fi
     done
-    # ws-max-8881 → Dropbear:22 (untuk SSH WS CDN TLS & NTLS)
-    cat > /etc/systemd/system/ws-max-8881.service <<WSSVC
+    # 2) Binary Python lama
+    rm -f /usr/local/bin/ws-max 2>/dev/null
+
+    # --- Install binary ws ---------------------------------------------------
+    local tmp; tmp=$(mktemp)
+    if dl "$WS_URL" "$tmp" && verify_binary "$tmp" 1000000; then
+        install -m755 "$tmp" "$WS_BIN"
+        ok "Binary ws terpasang: $WS_BIN"
+    else
+        rm -f "$tmp"
+        err "Gagal download ws dari $WS_URL"
+        return 1
+    fi
+    rm -f "$tmp"
+
+    # --- Generate tun.conf (format ws-epro v1.2.1) ---------------------------
+    # Schema: { listen: [ { listen_port, target_host, target_port }, ... ] }
+    # Listen 127.0.0.1:8881 → Dropbear:22 (Nginx terminasi TLS & route /ws-ssh)
+    cat > "$TUN_CONF" <<'TUNCONF'
+# MAX PANEL — ws-epro config
+# Internal listener untuk reverse-proxy Nginx (path /ws-ssh).
+# Jangan expose port ini langsung ke publik.
+listen:
+  - listen_port: 8881
+    target_host: 127.0.0.1
+    target_port: 22
+TUNCONF
+    chmod 644 "$TUN_CONF"
+
+    # --- Install systemd unit ------------------------------------------------
+    # Unit di-embed (alih-alih download) supaya install offline-friendly &
+    # kontrol penuh atas Restart policy.
+    cat > /etc/systemd/system/ws.service <<'WSSVC'
 [Unit]
-Description=MAX WS Proxy Dropbear (internal 127.0.0.1:8881 → Dropbear:22)
-After=network.target
+Description=MAX PANEL WebSocket (ws-epro)
+Documentation=https://github.com/jaka1m
+After=syslog.target network-online.target dropbear.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 $WS_BIN 8881 22
+NoNewPrivileges=true
+ExecStart=/usr/bin/ws -f /usr/bin/tun.conf
 Restart=on-failure
 RestartSec=3
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
 WSSVC
-    systemctl daemon-reload
-    systemctl enable  ws-max-8881 &>/dev/null
-    systemctl restart ws-max-8881 2>/dev/null
 
-    # FIX: TIDAK lagi append stunnel WS-TLS sections. Nginx terminasi TLS di port 443.
-    # Hapus block stunnel WS-TLS lama (idempotent) bila tertinggal dari versi sebelumnya.
+    systemctl daemon-reload
+    systemctl enable  ws.service &>/dev/null
+    systemctl restart ws.service 2>/dev/null
+
+    # --- Cleanup stunnel WS-TLS lama (legacy) --------------------------------
     if [[ -f /etc/stunnel/stunnel.conf ]]; then
-        # Hapus pakai marker (versi baru) dan section lama (versi lama tanpa marker)
         sed -i '/^# >>> MAXPANEL-WS-STUNNEL >>>$/,/^# <<< MAXPANEL-WS-STUNNEL <<<$/d' /etc/stunnel/stunnel.conf 2>/dev/null
-        # Legacy cleanup (sebelum marker dipakai)
-        sed -i '/^\[ws-tls-443\]/,/^$/d' /etc/stunnel/stunnel.conf 2>/dev/null
+        sed -i '/^\[ws-tls-443\]/,/^$/d'  /etc/stunnel/stunnel.conf 2>/dev/null
         sed -i '/^\[ws-tls-2096\]/,/^$/d' /etc/stunnel/stunnel.conf 2>/dev/null
         systemctl restart stunnel4 2>/dev/null
     fi
 
-    ok "WS proxy aktif di 127.0.0.1:8881 → Dropbear:22 (path /ws-ssh → Nginx CDN TLS:443 & CDN NTLS:8880)"
+    # --- Verifikasi ----------------------------------------------------------
+    sleep 1
+    if systemctl is-active --quiet ws.service; then
+        ok "ws-epro aktif di 127.0.0.1:8881 → Dropbear:22 (path /ws-ssh → Nginx CDN TLS:443 & NTLS:80/8880)"
+    else
+        err "ws.service gagal start. Cek: journalctl -u ws.service -n 30"
+        return 1
+    fi
 }
-
 # ════════════════════════════════════════════════════════════
 #  INSTALLER — Nginx reverse-proxy (path-routing untuk Xray)
 # ════════════════════════════════════════════════════════════
@@ -2164,7 +2102,7 @@ do_install_all() {
     _step 10 "OpenVPN (TCP 1194 + UDP 2200)";        install_openvpn
     _step 11 "WireGuard (UDP 51820)";                install_wireguard
     _step 12 "SlowDNS (port 53 + 5300)";             install_slowdns
-    _step 13 "WebSocket Python proxy";               install_ws_proxy
+    _step 13 "WebSocket (ws-epro)";                  install_ws_proxy
     _step 14 "Nginx reverse-proxy (path-routing)";   install_nginx
     _step 15 "Cron: expired cleanup + maxlogin + backup"; install_cron_jobs
 
