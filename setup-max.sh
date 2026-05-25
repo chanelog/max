@@ -8,9 +8,11 @@
 # ════════════════════════════════════════════════════════════
 #
 #   Protokol terinstall:
-#     • OpenSSH (2222)              • Dropbear (22, 143)
-#     • Stunnel SSL (445, 777)      • Nginx HTTP/TLS (80, 443, 8443)
-#     • SSH WebSocket via Nginx     → /ws-ssh (CDN-ready: 80, 443, 8880)
+#     • OpenSSH (22)                • Dropbear (109, 143)
+#     • Stunnel SSL (445, 777)      • Nginx HTTP/TLS (81, 443, 8443)
+#     • Squid Proxy (80, 8000, 3128) — support SSH-over-Proxy (CONNECT)
+#     • SSH WebSocket via Nginx     → /cdn (CDN-ready: 81, 443, 8880)
+#     • SSH WebSocket via Squid     → CONNECT host:80 → 127.0.0.1:8881
 #     • OpenVPN (TCP 1194 / UDP 2200)
 #     • Xray VMess/VLess/Trojan WS+gRPC + Shadowsocks (8388)
 #     • Trojan-Go (2087)            • BadVPN UDPGW (7100/7200/7300)
@@ -570,20 +572,35 @@ _tg_render_ssh() {
 🖥 <b>IP Publik</b> : <code>$(_tg_esc "$ip")</code>
 🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
 🔌 <b>Port SSH</b> : <code>22</code>
-🔌 <b>Dropbear</b> : <code>22, 143</code>
+🔌 <b>Dropbear</b> : <code>109, 143</code>
 🔒 <b>SSL/Stun.</b>: <code>445, 777</code>
-🔌 <b>WS HTTP</b>  : <code>80 (/ws-ssh)</code>
-🔒 <b>WS HTTPS</b> : <code>443 (/ws-ssh)</code>
-🔌 <b>WS NTLS</b>  : <code>8880 (/ws-ssh)</code>
+🟢 <b>Squid</b>    : <code>80, 8000, 3128</code>
+🔌 <b>WS HTTP</b>  : <code>81 (/cdn)</code>
+🔒 <b>WS HTTPS</b> : <code>443 (/cdn)</code>
+🔌 <b>WS NTLS</b>  : <code>8880 (/cdn)</code>
+🟢 <b>WS Squid</b> : <code>80 (CONNECT → SSH/Dropbear)</code>
 ────────────────────────────────────
-☁️ <b>CDN TLS</b>  : <code>$(_tg_esc "$dom"):443:/ws-ssh</code>
-☁️ <b>CDN NTLS</b> : <code>$(_tg_esc "$dom"):80:/ws-ssh</code>
-☁️ <b>CDN 8880</b> : <code>$(_tg_esc "$dom"):8880:/ws-ssh</code>
+☁️ <b>CDN TLS</b>  : <code>$(_tg_esc "$dom"):443:/cdn</code>
+☁️ <b>CDN NTLS</b> : <code>$(_tg_esc "$dom"):8880:/cdn</code>
+🟢 <b>SSH Squid</b>: <code>$(_tg_esc "$dom"):80 (proxy CONNECT)</code>
 📡 <b>OpenVPN</b>  : <code>TCP 1194 / UDP 2200</code>
 📡 <b>UDPGW</b>    : <code>7100, 7200, 7300</code>
 ────────────────────────────────────
-🐛 <b>Payload Bug (HTTP Injector / NPV Tunnel)</b>
-<code>HEAD /cdn-cgi/trace HTTP/1.1[crlf]Host: open.spotify.com[crlf][crlf]BMOVE / [protocol][crlf]Host: [host][crlf]Connection: Upgrade[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf][split]HTTP/1.1 200 OK[crlf][crlf]</code>
+🐛 <b>Payload Bug Rekomendasi</b>
+
+<b>1. CDN TLS (port 443) — SNI Bug Cloudflare</b>
+<code>GET / HTTP/1.1[crlf]Host: $(_tg_esc "$dom")[crlf]Upgrade: websocket[crlf][crlf]</code>
+<i>SNI / Server Name: <code>cdn.cloudflare.net</code> atau <code>graph.facebook.com</code></i>
+
+<b>2. CDN NTLS (port 80/8880) — Front Host Bug</b>
+<code>GET wss://cdn.cloudflare.net/cdn HTTP/1.1[crlf]Host: $(_tg_esc "$dom")[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]</code>
+
+<b>3. Direct TLS (port 443) — Plain WS</b>
+<code>GET /cdn HTTP/1.1[crlf]Host: $(_tg_esc "$dom")[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]</code>
+
+<b>4. Squid Proxy (port 80) — CONNECT</b>
+<code>CONNECT 127.0.0.1:109 HTTP/1.1[crlf]Host: 127.0.0.1[crlf][crlf]</code>
+<i>Proxy: <code>$(_tg_esc "$dom"):80</code> — target Dropbear:109 atau SSH:22</i>
 ────────────────────────────────────
 🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
 📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
@@ -965,20 +982,30 @@ show_box_ssh() {
     printf  "  ${A1}│${NC} 🖥  ${DIM}IP Publik${NC} : ${LG}%s${NC}\n" "$ip"
     printf  "  ${A1}│${NC} 🌐 ${DIM}Host    ${NC} : ${W}%s${NC}\n" "$dom"
     printf  "  ${A1}│${NC} 🔌 ${DIM}Port SSH ${NC}: ${Y}22${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}Dropbear ${NC}: ${Y}22, 143${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}Dropbear ${NC}: ${Y}109, 143${NC}\n"
     printf  "  ${A1}│${NC} 🔒 ${DIM}SSL/Stun.${NC}: ${Y}445, 777${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}80 (/ws-ssh)${NC}\n"
-    printf  "  ${A1}│${NC} 🔒 ${DIM}WS HTTPS ${NC}: ${Y}443 (/ws-ssh)${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}WS NTLS  ${NC}: ${Y}8880 (/ws-ssh)${NC}\n"
+    printf  "  ${A1}│${NC} 🟢 ${DIM}Squid    ${NC}: ${Y}80, 8000, 3128${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}81 (/cdn)${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}WS HTTPS ${NC}: ${Y}443 (/cdn)${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}WS NTLS  ${NC}: ${Y}8880 (/cdn)${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
-    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN TLS  ${NC}: ${Y}%s:443:/ws-ssh${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN NTLS ${NC}: ${Y}%s:80:/ws-ssh${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN 8880 ${NC}: ${Y}%s:8880:/ws-ssh${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN TLS  ${NC}: ${Y}%s:443:/cdn${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} ☁️  ${DIM}CDN NTLS ${NC}: ${Y}%s:8880:/cdn${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} 🟢 ${DIM}SSH Squid${NC}: ${Y}%s:80 (CONNECT)${NC}\n" "$dom"
     printf  "  ${A1}│${NC} 📡 ${DIM}OpenVPN  ${NC}: ${Y}TCP 1194 / UDP 2200${NC}\n"
     printf  "  ${A1}│${NC} 📡 ${DIM}UDPGW    ${NC}: ${Y}7100, 7200, 7300${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
-    printf  "  ${A1}│${NC} 🐛 ${DIM}Payload Bug (HTTP Injector / NPV Tunnel)${NC}\n"
-    printf  "  ${A1}│${NC} ${A3}HEAD /cdn-cgi/trace HTTP/1.1[crlf]Host: open.spotify.com[crlf][crlf]BMOVE / [protocol][crlf]Host: [host][crlf]Connection: Upgrade[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf][split]HTTP/1.1 200 OK[crlf][crlf]${NC}\n"
+    printf  "  ${A1}│${NC} 🐛 ${DIM}Payload Bug Rekomendasi:${NC}\n"
+    printf  "  ${A1}│${NC} ${BLD}${A2}1. CDN TLS (443) — SNI Cloudflare${NC}\n"
+    printf  "  ${A1}│${NC}   ${A3}GET / HTTP/1.1[crlf]Host: %s[crlf]Upgrade: websocket[crlf][crlf]${NC}\n" "$dom"
+    printf  "  ${A1}│${NC}   ${DIM}SNI: cdn.cloudflare.net / graph.facebook.com${NC}\n"
+    printf  "  ${A1}│${NC} ${BLD}${A2}2. CDN NTLS (80/8880) — Front Host${NC}\n"
+    printf  "  ${A1}│${NC}   ${A3}GET wss://cdn.cloudflare.net/cdn HTTP/1.1[crlf]Host: %s[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} ${BLD}${A2}3. Direct TLS — Plain WS${NC}\n"
+    printf  "  ${A1}│${NC}   ${A3}GET /cdn HTTP/1.1[crlf]Host: %s[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} ${BLD}${A2}4. Squid Proxy (80) — CONNECT${NC}\n"
+    printf  "  ${A1}│${NC}   ${A3}CONNECT 127.0.0.1:109 HTTP/1.1[crlf]Host: 127.0.0.1[crlf][crlf]${NC}\n"
+    printf  "  ${A1}│${NC}   ${DIM}Proxy: %s:80 → Dropbear:109 / SSH:22${NC}\n" "$dom"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} 🔒 ${DIM}MaxLogin${NC} : ${Y}%s device${NC}\n" "$maxl"
     printf  "  ${A1}│${NC} 📅 ${DIM}Expired ${NC} : ${Y}%s${NC}\n" "$exp"
@@ -1041,7 +1068,7 @@ install_deps() {
         fail2ban git build-essential libssl-dev python3 python3-pip dnsutils socat \
         figlet toilet boxes lolcat speedtest-cli wireguard wireguard-tools resolvconf \
         qrencode bc iptables iptables-persistent netfilter-persistent ca-certificates \
-        gnupg2 lsof psmisc openssl python3-websockify 2>/dev/null || true
+        gnupg2 lsof psmisc openssl python3-websockify squid 2>/dev/null || true
     # retry sekali lagi tanpa fail-on-missing untuk paket opsional
     apt-get install -y -qq nginx jq 2>/dev/null || true
     ok "Dependensi terpasang"
@@ -1051,28 +1078,28 @@ install_deps() {
 #  INSTALLER — SSH + Dropbear + Stunnel
 # ════════════════════════════════════════════════════════════
 install_ssh() {
-    inf "Konfigurasi OpenSSH (port 2222 — Dropbear akan pakai port 22)..."
-    # OpenSSH dipindah ke port 2222, port 22 diserahkan ke Dropbear
-    sed -i 's/^#\?Port .*/Port 2222/' /etc/ssh/sshd_config 2>/dev/null
-    grep -qE '^Port[[:space:]]+2222$' /etc/ssh/sshd_config 2>/dev/null || \
-        echo "Port 2222" >> /etc/ssh/sshd_config
-    # Bersihkan baris "Port 80" / "Port 443" / "Port 22" jika ada (sisa install lama)
-    sed -i '/^Port[[:space:]]\+80$/d'  /etc/ssh/sshd_config 2>/dev/null
-    sed -i '/^Port[[:space:]]\+443$/d' /etc/ssh/sshd_config 2>/dev/null
-    sed -i '/^Port[[:space:]]\+22$/d'  /etc/ssh/sshd_config 2>/dev/null
+    inf "Konfigurasi OpenSSH (port 22 — bawaan)..."
+    # OpenSSH kembali ke port standar 22
+    sed -i 's/^#\?Port .*/Port 22/' /etc/ssh/sshd_config 2>/dev/null
+    grep -qE '^Port[[:space:]]+22$' /etc/ssh/sshd_config 2>/dev/null || \
+        echo "Port 22" >> /etc/ssh/sshd_config
+    # Bersihkan baris "Port 80" / "Port 443" / "Port 2222" jika ada (sisa install lama)
+    sed -i '/^Port[[:space:]]\+80$/d'   /etc/ssh/sshd_config 2>/dev/null
+    sed -i '/^Port[[:space:]]\+443$/d'  /etc/ssh/sshd_config 2>/dev/null
+    sed -i '/^Port[[:space:]]\+2222$/d' /etc/ssh/sshd_config 2>/dev/null
     # PermitRoot login & password auth (sesuaikan)
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-    ok "OpenSSH siap: 2222 (Dropbear pakai port 22)"
+    ok "OpenSSH siap: 22 (default)"
 
     # ── Dropbear ─────────────────────────────────────────────────────────
-    inf "Konfigurasi Dropbear (port 22, 143)..."
+    inf "Konfigurasi Dropbear (port 109, 143 — bawaan klasik)..."
     if [[ -f /etc/default/dropbear ]]; then
         sed -i 's/^NO_START=.*/NO_START=0/' /etc/default/dropbear
         # Hapus semua baris DROPBEAR_PORT (termasuk yang di-comment) lalu tambah baru
         sed -i '/^#\?DROPBEAR_PORT=/d' /etc/default/dropbear
-        echo 'DROPBEAR_PORT=22' >> /etc/default/dropbear
+        echo 'DROPBEAR_PORT=109' >> /etc/default/dropbear
         # Hapus semua baris DROPBEAR_EXTRA_ARGS lalu tambah baru
         sed -i '/^#\?DROPBEAR_EXTRA_ARGS=/d' /etc/default/dropbear
         echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
@@ -1087,11 +1114,11 @@ install_ssh() {
     grep -qx '/usr/sbin/nologin'  /etc/shells 2>/dev/null || echo '/usr/sbin/nologin'  >> /etc/shells
     systemctl enable dropbear &>/dev/null
     systemctl restart dropbear 2>/dev/null
-    ok "Dropbear siap: 22, 143"
+    ok "Dropbear siap: 109, 143"
 
     # ── Stunnel SSL ─────────────────────────────────────────────────────────
     # FIX: port 443 dihandle Nginx (TLS termination). Stunnel HANYA listen di 445 & 777.
-    inf "Konfigurasi Stunnel SSL (port 445 → Dropbear:22, 777 → OpenSSH:2222)..."
+    inf "Konfigurasi Stunnel SSL (port 445 → Dropbear:109, 777 → OpenSSH:22)..."
     mkdir -p /etc/stunnel
     if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
         openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
@@ -1113,11 +1140,11 @@ socket = r:TCP_NODELAY=1
 
 [dropbear-ssl-445]
 accept = 445
-connect = 127.0.0.1:22
+connect = 127.0.0.1:109
 
 [openssh-ssl-777]
 accept = 777
-connect = 127.0.0.1:2222
+connect = 127.0.0.1:22
 STUN
     chmod 600 /etc/stunnel/stunnel.pem 2>/dev/null
     # Aktifkan stunnel
@@ -1715,7 +1742,7 @@ SLDEOF
 # ════════════════════════════════════════════════════════════
 # FIX: Python ws-proxy diganti dengan binary Go `ws` (ws-epro v1.2.1) +
 #      service `ws.service` dari repo chanelog/max. Listen di
-#      127.0.0.1:8881 → Dropbear:22 (port sama → kompatibel dgn Nginx /ws-ssh).
+#      127.0.0.1:8881 → Dropbear:109 (path /cdn via Nginx & via Squid CONNECT).
 install_ws_proxy() {
     inf "Install WebSocket binary (ws-epro)..."
     mkdir -p "$WS_DIR"
@@ -1749,15 +1776,15 @@ install_ws_proxy() {
 
     # --- Generate tun.conf (format ws-epro v1.2.1) ---------------------------
     # Schema: { listen: [ { listen_port, target_host, target_port }, ... ] }
-    # Listen 127.0.0.1:8881 → Dropbear:22 (Nginx terminasi TLS & route /ws-ssh)
+    # Listen 127.0.0.1:8881 → Dropbear:109 (Nginx terminasi TLS & route /cdn)
     cat > "$TUN_CONF" <<'TUNCONF'
 # MAX PANEL — ws-epro config
-# Internal listener untuk reverse-proxy Nginx (path /ws-ssh).
+# Internal listener untuk reverse-proxy Nginx (path /cdn) & Squid CONNECT.
 # Jangan expose port ini langsung ke publik.
 listen:
   - listen_port: 8881
     target_host: 127.0.0.1
-    target_port: 22
+    target_port: 109
 TUNCONF
     chmod 644 "$TUN_CONF"
 
@@ -1801,17 +1828,135 @@ WSSVC
     # --- Verifikasi ----------------------------------------------------------
     sleep 1
     if systemctl is-active --quiet ws.service; then
-        ok "ws-epro aktif di 127.0.0.1:8881 → Dropbear:22 (path /ws-ssh → Nginx CDN TLS:443 & NTLS:80/8880)"
+        ok "ws-epro aktif di 127.0.0.1:8881 → Dropbear:109 (path /cdn → Nginx CDN TLS:443 & NTLS:81/8880, juga via Squid CONNECT:80)"
     else
         err "ws.service gagal start. Cek: journalctl -u ws.service -n 30"
         return 1
     fi
 }
 # ════════════════════════════════════════════════════════════
+#  INSTALLER — Squid Proxy (port 80, 8000, 3128)
+# ────────────────────────────────────────────────────────────
+#  Squid bertindak sebagai HTTP/HTTPS proxy + CONNECT method
+#  untuk SSH-over-Proxy. Mendukung 3 port:
+#     • 80    → publik (rekomendasi untuk klien SSH WS)
+#     • 8000  → alternatif (banyak ISP/captive portal allow)
+#     • 3128  → standar squid (debug/test)
+#
+#  CONNECT method di-allow ke localhost ports:
+#     • 22  (OpenSSH)
+#     • 109 (Dropbear)
+#     • 143 (Dropbear alt)
+#     • 8881 (ws-epro → Dropbear:109) → bisa pakai SSH WS via Squid
+# ════════════════════════════════════════════════════════════
+install_squid() {
+    inf "Install Squid Proxy (port 80, 8000, 3128)..."
+    if ! command -v squid &>/dev/null; then
+        apt-get install -y -qq squid 2>/dev/null || apt-get install -y -qq squid3 2>/dev/null
+    fi
+    if ! command -v squid &>/dev/null && ! command -v squid3 &>/dev/null; then
+        err "Squid gagal terinstall — fitur dilewati"
+        return 1
+    fi
+
+    local dom; dom=$(get_domain)
+    mkdir -p /etc/squid /var/log/squid /var/spool/squid
+    chown -R proxy:proxy /var/log/squid /var/spool/squid 2>/dev/null || true
+
+    # Backup config asli (sekali saja)
+    if [[ -f /etc/squid/squid.conf && ! -f /etc/squid/squid.conf.dpkg-orig ]]; then
+        cp /etc/squid/squid.conf /etc/squid/squid.conf.dpkg-orig
+    fi
+
+    # Generate config — minimal, fokus untuk SSH-over-Proxy + WS CONNECT
+    cat > /etc/squid/squid.conf <<SQUIDCONF
+# MAX PANEL — Squid Proxy Config
+# Listen ports: 80 (publik), 8000 (alternatif), 3128 (standar)
+http_port 80
+http_port 8000
+http_port 3128
+
+# Visible hostname (banner CONNECT)
+visible_hostname ${dom}
+
+# === ACL ============================================================
+acl localnet src 0.0.0.0/0
+acl localnet src ::/0
+acl SSL_ports port 443 22 109 143 8881
+acl Safe_ports port 22          # ssh
+acl Safe_ports port 80          # http
+acl Safe_ports port 109         # dropbear
+acl Safe_ports port 143         # dropbear alt
+acl Safe_ports port 443         # https
+acl Safe_ports port 8000        # alt
+acl Safe_ports port 3128        # squid
+acl Safe_ports port 8881        # ws-epro
+acl Safe_ports port 1025-65535  # unregistered
+acl CONNECT method CONNECT
+
+# === Access rules ===================================================
+http_access deny !Safe_ports
+# IZINKAN CONNECT ke port apa saja di SSL_ports (untuk SSH/WS via proxy)
+http_access allow CONNECT SSL_ports
+http_access allow localhost manager
+http_access deny manager
+http_access allow localhost
+http_access allow localnet
+http_access allow all
+
+# === Cache & Logging ================================================
+cache_dir ufs /var/spool/squid 100 16 256
+coredump_dir /var/spool/squid
+access_log /var/log/squid/access.log squid
+cache_log /var/log/squid/cache.log
+
+# === Refresh patterns (default minimal) =============================
+refresh_pattern ^ftp:           1440    20%     10080
+refresh_pattern ^gopher:        1440    0%      1440
+refresh_pattern -i (/cgi-bin/|\?) 0     0%      0
+refresh_pattern .               0       20%     4320
+
+# === Tweak — anonymize client supaya respon CONNECT lebih bersih ====
+forwarded_for off
+via off
+request_header_access X-Forwarded-For deny all
+request_header_access Via deny all
+
+# Banner respon "200 OK" untuk CONNECT (custom payload-friendly)
+# Squid built-in akan jawab "HTTP/1.1 200 Connection established"
+# yang kompatibel dengan HTTP Injector / NPV Tunnel default.
+
+# Disable cache untuk hemat IO (proxy-only)
+cache deny all
+SQUIDCONF
+    chmod 644 /etc/squid/squid.conf
+
+    # Init cache dir kalau belum
+    if [[ ! -d /var/spool/squid/00 ]]; then
+        squid -z &>/dev/null || true
+        sleep 1
+    fi
+
+    systemctl enable squid &>/dev/null
+    # Stop dulu kalau ada nginx/apache pegang port 80
+    fuser -k 80/tcp 2>/dev/null
+    sleep 1
+    systemctl restart squid 2>/dev/null
+
+    sleep 2
+    if systemctl is-active --quiet squid; then
+        ok "Squid Proxy aktif di port 80, 8000, 3128 (CONNECT support: 22, 109, 143, 8881)"
+    else
+        err "Squid gagal start. Cek: journalctl -u squid -n 30"
+        return 1
+    fi
+}
+
+# ════════════════════════════════════════════════════════════
 #  INSTALLER — Nginx reverse-proxy (path-routing untuk Xray)
 # ════════════════════════════════════════════════════════════
 install_nginx() {
-    inf "Install Nginx + reverse-proxy path-routing (80/443 + 8443 alt-TLS)..."
+    inf "Install Nginx + reverse-proxy path-routing (81/443 + 8443 alt-TLS, port 80 dipegang Squid)..."
     if ! command -v nginx &>/dev/null; then
         apt-get install -y -qq nginx 2>/dev/null
     fi
@@ -1822,8 +1967,9 @@ install_nginx() {
     # Remove default site (akan dipegang config kita)
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null
 
-    # FIX: Nginx sekarang listen di 80 (HTTP) + 443 (TLS) + 8443 (alt-TLS).
-    # Semua path Xray + WS-SSH dirutekan dari sini. SSH/Dropbear/Stunnel TIDAK pakai 80/443.
+    # FIX: Nginx sekarang listen di 81 (HTTP) + 443 (TLS) + 8443 (alt-TLS) + 8880 (NTLS public).
+    # Port 80 dipegang Squid Proxy → kompatibel SSHWS via CONNECT method.
+    # Semua path Xray + SSH-WS dirutekan dari sini. SSH/Dropbear/Stunnel TIDAK pakai 81/443.
     #
     # Xray inbound mapping (semua 127.0.0.1):
     #   /vmess       → 10001  (VMess WS)
@@ -1831,16 +1977,16 @@ install_nginx() {
     #   /trojan-ws   → 10003  (Trojan WS)
     #   /vless-grpc  → 10004  (VLess gRPC)  — hanya di server TLS
     #   /trojan-grpc → 10005  (Trojan gRPC) — hanya di server TLS
-    #   /ws-ssh      → 8881   (SSH-over-WS via python proxy → Dropbear:109)
+    #   /cdn         → 8881   (SSH-over-WS via ws-epro → Dropbear:109)
     cat > /etc/nginx/conf.d/xray.conf <<NGX
-# MAX PANEL — Xray reverse-proxy (HTTP 80 + TLS 443 + alt-TLS 8443)
+# MAX PANEL — Xray reverse-proxy (HTTP 81 + TLS 443 + alt-TLS 8443 + NTLS 8880)
 # === SHARED PROXY HEADERS ===========================================
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
 
-# === HTTP 80 (plain) =================================================
+# === HTTP 81 (plain — Squid pegang port 80) ==========================
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
+    listen 81 default_server;
+    listen [::]:81 default_server;
     server_name ${dom} _;
     root /var/www/html;
     index index.html;
@@ -1878,8 +2024,8 @@ server {
         proxy_read_timeout 300s;
     }
 
-    # SSH-over-WebSocket CDN NTLS (Nginx → python WS proxy → Dropbear:109)
-    location = /ws-ssh {
+    # SSH-over-WebSocket CDN NTLS (Nginx → ws-epro → Dropbear:109)
+    location = /cdn {
         proxy_redirect off;
         proxy_pass http://127.0.0.1:8881;
         proxy_http_version 1.1;
@@ -1943,7 +2089,7 @@ server {
         proxy_set_header Host \$host;
         proxy_read_timeout 300s;
     }
-    location = /ws-ssh {
+    location = /cdn {
         proxy_pass http://127.0.0.1:8881;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -1979,7 +2125,7 @@ server {
     location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
     location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
     location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
-    location = /ws-ssh    { proxy_pass http://127.0.0.1:8881;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_buffering off; }
+    location = /cdn        { proxy_pass http://127.0.0.1:8881;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_buffering off; }
     location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
 }
 
@@ -1989,7 +2135,7 @@ server {
     listen [::]:8880;
     server_name ${dom} _;
 
-    location = /ws-ssh {
+    location = /cdn {
         proxy_pass http://127.0.0.1:8881;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -2006,7 +2152,7 @@ NGX
     if nginx -t &>/dev/null; then
         systemctl enable nginx &>/dev/null
         systemctl restart nginx 2>/dev/null
-        is_up nginx && ok "Nginx aktif (80 HTTP + 443/8443 TLS)" || warn "Nginx belum aktif"
+        is_up nginx && ok "Nginx aktif (81 HTTP + 443/8443 TLS + 8880 NTLS)" || warn "Nginx belum aktif"
     else
         err "Konfigurasi Nginx INVALID — cek: nginx -t"
         nginx -t 2>&1 | tail -10 | while read -r ln; do warn "  $ln"; done
@@ -2085,14 +2231,14 @@ do_install_all() {
 
     echo ""
     echo -e "  ${A1}${_DASH}${NC}"
-    inf "Mulai instalasi ${AL}MAX PANEL Premium${NC} → 15 langkah..."
+    inf "Mulai instalasi ${AL}MAX PANEL Premium${NC} → 16 langkah..."
     echo -e "  ${A1}${_DASH}${NC}"; echo ""
 
     _step() {
         local n="$1" desc="$2"
         CURRENT_STEP="$desc"
         echo ""
-        echo -e "  ${A4}[${n}/15]${NC} ${BLD}${AL}${desc}${NC}"
+        echo -e "  ${A4}[${n}/16]${NC} ${BLD}${AL}${desc}${NC}"
         echo -e "  ${A1}${_DASH}${NC}"
     }
 
@@ -2109,8 +2255,9 @@ do_install_all() {
     _step 11 "WireGuard (UDP 51820)";                install_wireguard
     _step 12 "SlowDNS (port 53 + 5300)";             install_slowdns
     _step 13 "WebSocket (ws-epro)";                  install_ws_proxy
-    _step 14 "Nginx reverse-proxy (path-routing)";   install_nginx
-    _step 15 "Cron: expired cleanup + maxlogin + backup"; install_cron_jobs
+    _step 14 "Squid Proxy (80/8000/3128)";           install_squid
+    _step 15 "Nginx reverse-proxy (path-routing)";   install_nginx
+    _step 16 "Cron: expired cleanup + maxlogin + backup"; install_cron_jobs
 
     trap - ERR
 
@@ -2136,15 +2283,17 @@ do_install_all() {
     echo -e "  ${A1}${_DASH}${NC}"
     echo -e "  ${BLD}${A4}  Daftar Protokol & Port${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
-    printf  "  ${A3}•${NC} OpenSSH         : ${Y}2222${NC}\n"
+    printf  "  ${A3}•${NC} OpenSSH         : ${Y}22${NC}\n"
     printf  "  ${A3}•${NC} Dropbear        : ${Y}109, 143${NC}\n"
     printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}445, 777${NC}\n"
-    printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}80${NC}  — paths: /vmess /vless /trojan-ws /ws-ssh\n"
+    printf  "  ${A3}•${NC} Squid Proxy     : ${Y}80, 8000, 3128${NC} (CONNECT → SSH/Dropbear)\n"
+    printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}81${NC}  — paths: /vmess /vless /trojan-ws /cdn\n"
     printf  "  ${A3}•${NC} Nginx (TLS)     : ${Y}443${NC}, ${Y}8443${NC} alt — + /vless-grpc /trojan-grpc\n"
-    printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}/ws-ssh${NC} (→ internal 127.0.0.1:8881)\n"
+    printf  "  ${A3}•${NC} Nginx (NTLS)    : ${Y}8880${NC}  — path: /cdn (SSH WS public)\n"
+    printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}/cdn${NC} (→ internal 127.0.0.1:8881 → Dropbear:109)\n"
     printf  "  ${A3}•${NC} OpenVPN         : ${Y}TCP 1194, UDP 2200${NC}\n"
-    printf  "  ${A3}•${NC} Xray VMess WS   : ${Y}/vmess (80, 443)${NC}\n"
-    printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (80, 443)${NC} + gRPC ${Y}443${NC}\n"
+    printf  "  ${A3}•${NC} Xray VMess WS   : ${Y}/vmess (81, 443)${NC}\n"
+    printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (81, 443)${NC} + gRPC ${Y}443${NC}\n"
     printf  "  ${A3}•${NC} Xray Trojan     : ${Y}/trojan-ws (443)${NC} + gRPC ${Y}443${NC}\n"
     printf  "  ${A3}•${NC} Shadowsocks-22  : ${Y}8388${NC}\n"
     printf  "  ${A3}•${NC} Trojan-Go       : ${Y}2087${NC}\n"
@@ -4805,13 +4954,13 @@ menu_about() {
   Lisensi  : ${A3}Open / Free${NC}
 
   ${DIM}Protokol terinstall:${NC}
-   • OpenSSH (2222)                 • Dropbear (22, 143)
-   • Stunnel SSL (445, 777)        • Nginx (80 / 443 / 8443)
-   • SSH WebSocket via Nginx        • OpenVPN (TCP 1194 / UDP 2200)
-   • Xray VMess/VLess/Trojan/SS    • Trojan-Go (2087)
-   • Hysteria 2 (UDP 36712 + range) • BadVPN UDPGW (7100/7200/7300)
-   • WireGuard (UDP 51820)         • SlowDNS (53 → 5300)
-   • OHP (8080) opsional
+   • OpenSSH (22)                   • Dropbear (109, 143)
+   • Stunnel SSL (445, 777)        • Nginx (81 / 443 / 8443 / 8880)
+   • Squid Proxy (80, 8000, 3128)  • SSH WebSocket via Nginx + Squid
+   • OpenVPN (TCP 1194 / UDP 2200) • Xray VMess/VLess/Trojan/SS
+   • Trojan-Go (2087)              • Hysteria 2 (UDP 36712 + range)
+   • BadVPN UDPGW (7100/7200/7300) • WireGuard (UDP 51820)
+   • SlowDNS (53 → 5300)           • OHP (8080) opsional
 
   ${DIM}Path config:${NC}
    • /etc/maxpanel/        : panel data + user DB
