@@ -582,6 +582,9 @@ _tg_render_ssh() {
 📡 <b>OpenVPN</b>  : <code>TCP 1194 / UDP 2200</code>
 📡 <b>UDPGW</b>    : <code>7100, 7200, 7300</code>
 ────────────────────────────────────
+🐛 <b>Payload Bug (HTTP Injector / NPV Tunnel)</b>
+<code>HEAD /cdn-cgi/trace HTTP/1.1[crlf]Host: open.spotify.com[crlf][crlf]BMOVE / [protocol][crlf]Host: [host][crlf]Connection: Upgrade[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf][split]HTTP/1.1 200 OK[crlf][crlf]</code>
+────────────────────────────────────
 🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
 📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
 EOF
@@ -973,6 +976,9 @@ show_box_ssh() {
     printf  "  ${A1}│${NC} ☁️  ${DIM}CDN 8880 ${NC}: ${Y}%s:8880:/ws-ssh${NC}\n" "$dom"
     printf  "  ${A1}│${NC} 📡 ${DIM}OpenVPN  ${NC}: ${Y}TCP 1194 / UDP 2200${NC}\n"
     printf  "  ${A1}│${NC} 📡 ${DIM}UDPGW    ${NC}: ${Y}7100, 7200, 7300${NC}\n"
+    echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
+    printf  "  ${A1}│${NC} 🐛 ${DIM}Payload Bug (HTTP Injector / NPV Tunnel)${NC}\n"
+    printf  "  ${A1}│${NC} ${A3}HEAD /cdn-cgi/trace HTTP/1.1[crlf]Host: open.spotify.com[crlf][crlf]BMOVE / [protocol][crlf]Host: [host][crlf]Connection: Upgrade[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf][split]HTTP/1.1 200 OK[crlf][crlf]${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} 🔒 ${DIM}MaxLogin${NC} : ${Y}%s device${NC}\n" "$maxl"
     printf  "  ${A1}│${NC} 📅 ${DIM}Expired ${NC} : ${Y}%s${NC}\n" "$exp"
