@@ -1174,150 +1174,30 @@ install_deps() {
     ok "Dependensi terpasang (Nginx: $(nginx -v 2>&1 | awk -F/ '{print $2}'))"
 }
 
-# ════════════════════════════════════════════════════════════
-#  BANNER MOTD — MAX-PAN (tampil setiap SSH konek)
-# ════════════════════════════════════════════════════════════
-# Tulis banner default ala MAX-PAN ke /etc/issue.net.
-# Format: warna ANSI tetap dipakai supaya cantik di terminal,
-# dan plain-text fallback kalau client tidak support warna.
-write_default_banner() {
-    local target="${1:-/etc/issue.net}"
-    # NOTE: pakai printf '%b' supaya \033 (ESC) di-translate jadi karakter ANSI
-    # asli (0x1B). Heredoc quoted ('EOF') akan menulis '\033' apa adanya
-    # sebagai 4 karakter literal — banner tidak akan ber-warna.
-    printf '%b' '
-       \033[1;37m┌──────────\033[0m\033[1;32m》  《\033[0m\033[1;37m──────────┐\033[0m
-              \033[1;32m\xe2\x88\x9e MAX-PAN SSH \xe2\x88\x9e\033[0m
-       \033[1;37m┌──────────\033[0m\033[1;32m》  《\033[0m\033[1;37m──────────┐\033[0m
-                  \033[1;33m》 RULLES 《\033[0m
-                 \033[1;32mNO MULTILOGIN\033[0m
-                  \033[1;35mNO PORN 18+\033[0m
-                    \033[1;36mNO DDOS\033[0m
-                  \033[1;33mNO TORRENT\033[0m
-                  \033[1;35mNO HACKING\033[0m
-                    \033[1;37mNO SPAM\033[0m
-                   \033[1;37mNO CARDING\033[0m
-              \033[1;31mMELANGGAR AUTO BANNED\033[0m
-       \033[1;37m┌──────────\033[0m\033[1;32m》\033[0m \033[1;33m`(°_°)´\033[0m \033[1;32m《\033[0m\033[1;37m──────────┐\033[0m
-                     \033[1;37m》 《\033[0m
-            \033[1;37mORDER : wa.me/6283825566891\033[0m
-                     \033[1;37m》 《\033[0m
-
-' > "$target"
-    chmod 644 "$target" 2>/dev/null
-    # Sinkronkan ke /etc/issue (login lokal/console) juga supaya konsisten
-    cp -f "$target" /etc/issue 2>/dev/null
-    # Sinkronkan ke /etc/motd juga — supaya banner tampil SETELAH login berhasil
-    # (penting untuk SSHWS TLS/NTLS via Nginx → Dropbear, karena sebagian client
-    # WebSocket tidak menampilkan pre-auth banner /etc/issue.net).
-    cp -f "$target" /etc/motd 2>/dev/null
-
-    # Install semua hook (PAM motd, profile.d, bash.bashrc) — idempotent.
-    _install_banner_hooks
-}
-
-# ════════════════════════════════════════════════════════════
-#  BANNER HOOKS — Pastikan banner muncul di semua jalur SSH
-# ────────────────────────────────────────────────────────────
-#  Dipisah dari write_default_banner supaya bisa dipanggil ulang
-#  TANPA menimpa /etc/issue.net (untuk user yang pakai banner custom).
+# (Banner MOTD dihilangkan — user tidak pakai banner)
 #
-#  Jalur SSH yang harus di-cover:
-#    1. OpenSSH direct (port 22/99/169/...)         → Banner directive + PrintMotd
-#    2. Dropbear direct (port 109/143/300/1153)     → -b /etc/issue.net (di install_ssh)
-#    3. SSHWS TLS  (Client → Nginx:443  → ws-epro → Dropbear:109)
-#    4. SSHWS NTLS (Client → Nginx:8880 → ws-epro → Dropbear:109)
-#
-#  Untuk jalur (3) & (4), banyak client WebSocket (HTTP Injector,
-#  Open Tunnel, NPV Tunnel, dll) TIDAK menampilkan pre-auth banner.
-#  Solusi: tampilkan banner via login shell hook di /etc/profile.d/
-#  dan /etc/bash.bashrc, yang ke-source setiap kali shell start.
-# ════════════════════════════════════════════════════════════
-_install_banner_hooks() {
-    # ── 1. PAM motd untuk OpenSSH (post-auth /etc/motd) ──────────────────
-    if [[ -f /etc/pam.d/sshd ]]; then
-        # Aktifkan motd module bila ter-comment / belum ada
-        if grep -q '^#\s*session\s\+optional\s\+pam_motd\.so' /etc/pam.d/sshd; then
-            sed -i 's|^#\s*\(session\s\+optional\s\+pam_motd\.so.*\)|\1|' /etc/pam.d/sshd
-        elif ! grep -q '^session\s\+optional\s\+pam_motd\.so' /etc/pam.d/sshd; then
-            echo 'session    optional     pam_motd.so motd=/etc/motd' >> /etc/pam.d/sshd
-        fi
-    fi
-    # Matikan dynamic motd biar tidak override /etc/motd kita
-    if [[ -d /etc/update-motd.d ]]; then
-        chmod -x /etc/update-motd.d/* 2>/dev/null || true
-    fi
-
-    # ── 2. PROFILE.D HOOK — login shell (paling reliable) ────────────────
-    # SSHWS TLS/NTLS jalur: Client → Nginx (443/8880) → ws-epro → Dropbear:109
-    # → user shell. Banyak client WS (HTTP Injector, Open Tunnel, dll) tidak
-    # menampilkan:
-    #   • Pre-auth banner Dropbear (-b /etc/issue.net) → di-swallow saat WS
-    #     handshake / langsung di-skip oleh client.
-    #   • /etc/motd via pam_motd → Dropbear di Debian by-default TANPA PAM,
-    #     jadi pam_motd tidak ke-trigger.
-    # Solusi: tulis hook ke /etc/profile.d/ — script ini di-source SETIAP
-    # kali login shell dijalankan (bash/sh/dash), di SEMUA jalur SSH:
-    # OpenSSH, Dropbear langsung, dan SSHWS TLS/NTLS via Dropbear.
-    cat > /etc/profile.d/00-maxpan-banner.sh <<'PROFILE_EOF'
-# MAX PANEL — Banner login shell
-# Ditulis otomatis oleh setup-max.sh / _install_banner_hooks().
-# Tampil pada SEMUA login shell: OpenSSH, Dropbear, SSHWS TLS/NTLS.
-case "$-" in
-    *i*) ;;        # interaktif → lanjut
-    *)   return ;; # non-interaktif (scp/sftp/exec) → skip
-esac
-# Hindari double-print kalau sudah tampil di session ini
-if [ -z "${MAXPAN_BANNER_SHOWN:-}" ] && [ -r /etc/issue.net ]; then
-    cat /etc/issue.net
-    export MAXPAN_BANNER_SHOWN=1
-fi
-PROFILE_EOF
-    chmod 644 /etc/profile.d/00-maxpan-banner.sh
-
-    # ── 3. BASH.BASHRC HOOK — fallback non-login bash interaktif ────────
-    # Beberapa client WebSocket (Open Tunnel, NPV Tunnel) langsung exec
-    # `bash` non-login → /etc/profile.d tidak ter-source. /etc/bash.bashrc
-    # SELALU ke-source untuk shell interaktif bash, baik login maupun non-login.
-    if [[ -f /etc/bash.bashrc ]]; then
-        # Idempotent: hapus block lama dulu, baru tulis ulang
-        sed -i '/^# >>> MAXPANEL-BANNER >>>$/,/^# <<< MAXPANEL-BANNER <<<$/d' /etc/bash.bashrc 2>/dev/null
-        cat >> /etc/bash.bashrc <<'BASHRC_EOF'
-# >>> MAXPANEL-BANNER >>>
-# Tampilkan banner /etc/issue.net pada bash interaktif (SSHWS via Dropbear).
-case "$-" in *i*)
-    if [ -z "${MAXPAN_BANNER_SHOWN:-}" ] && [ -r /etc/issue.net ]; then
-        cat /etc/issue.net
-        export MAXPAN_BANNER_SHOWN=1
-    fi
-;; esac
-# <<< MAXPANEL-BANNER <<<
-BASHRC_EOF
-    fi
-
-    # ── 4. /etc/profile fallback — kalau /etc/profile.d/ tidak di-loop ───
-    # Beberapa container/distro minimal tidak loop /etc/profile.d/* dari
-    # /etc/profile. Tambah loader manual (idempotent).
-    if [[ -f /etc/profile ]]; then
-        if ! grep -q 'MAXPANEL-PROFILE-LOADER' /etc/profile 2>/dev/null; then
-            cat >> /etc/profile <<'PROF_EOF'
-# >>> MAXPANEL-PROFILE-LOADER >>>
-if [ -d /etc/profile.d ]; then
-    for _f in /etc/profile.d/*.sh; do
-        [ -r "$_f" ] && . "$_f"
-    done
-    unset _f
-fi
-# <<< MAXPANEL-PROFILE-LOADER <<<
-PROF_EOF
-        fi
-    fi
+# Hapus sisa banner dari install lama (idempotent — aman dipanggil berulang).
+# Dipanggil dari install_ssh() dan dari MAIN ENTRYPOINT setelah load_theme,
+# supaya re-run script otomatis membersihkan jejak banner versi terdahulu.
+_purge_legacy_banner() {
+    rm -f /etc/issue.net /etc/motd 2>/dev/null
+    : > /etc/issue 2>/dev/null
+    rm -f /etc/profile.d/00-maxpan-banner.sh 2>/dev/null
+    rm -f /etc/max-panel-splash.sh 2>/dev/null
+    sed -i '/^# >>> MAXPANEL-BANNER >>>$/,/^# <<< MAXPANEL-BANNER <<<$/d' /etc/bash.bashrc 2>/dev/null
+    sed -i '/^# >>> MAXPANEL-PROFILE-LOADER >>>$/,/^# <<< MAXPANEL-PROFILE-LOADER <<<$/d' /etc/profile 2>/dev/null
+    sed -i '/^Banner[[:space:]]\+\/etc\/issue\.net$/d' /etc/ssh/sshd_config 2>/dev/null
+    sed -i '/^PrintMotd[[:space:]]\+yes$/d' /etc/ssh/sshd_config 2>/dev/null
+    sed -i '/MAX-PANEL-SPLASH/d' /root/.bashrc 2>/dev/null
+    sed -i '/max-panel-splash/d' /root/.bashrc 2>/dev/null
 }
 
 # ════════════════════════════════════════════════════════════
 #  INSTALLER — SSH + Dropbear + Stunnel
 # ════════════════════════════════════════════════════════════
 install_ssh() {
+    # Bersihkan jejak banner dari install lama (jika ada).
+    _purge_legacy_banner
     inf "Konfigurasi OpenSSH (multi-port: 22, 99, 169, 2269, 3369)..."
     # Bersihkan SEMUA baris Port lama dulu
     sed -i '/^#\?Port[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
@@ -1333,20 +1213,9 @@ install_ssh() {
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
 
-    # ── Banner MOTD: tampil setiap kali SSH konek (sebelum prompt password) ──
-    # Pasang banner default MAX-PAN bila /etc/issue.net belum ada / kosong
-    if [[ ! -s /etc/issue.net ]]; then
-        write_default_banner
-    fi
-    # SELALU re-install hook profile.d & bash.bashrc (idempotent) supaya banner
-    # muncul di SSHWS TLS/NTLS via Dropbear, bahkan kalau user pakai banner custom.
-    _install_banner_hooks
-    # Pastikan directive Banner aktif (idempotent) — pre-auth banner
-    sed -i '/^#\?Banner[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
-    echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
-    # PrintMotd yes — post-auth banner (penting untuk SSHWS TLS/NTLS via Nginx)
-    sed -i '/^#\?PrintMotd[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
-    echo "PrintMotd yes" >> /etc/ssh/sshd_config
+    # Cleanup directive Banner / PrintMotd dari config lama (idempotent)
+    sed -i '/^Banner[[:space:]]\+\/etc\/issue\.net$/d' /etc/ssh/sshd_config 2>/dev/null
+    sed -i '/^PrintMotd[[:space:]]\+yes$/d' /etc/ssh/sshd_config 2>/dev/null
     # PrintLastLog optional — biarkan default (yes), tidak diubah
 
     # Buka firewall (kalau ufw aktif)
@@ -1363,9 +1232,9 @@ install_ssh() {
         # Hapus semua baris DROPBEAR_PORT (termasuk yang di-comment) lalu tambah baru
         sed -i '/^#\?DROPBEAR_PORT=/d' /etc/default/dropbear
         echo 'DROPBEAR_PORT=109' >> /etc/default/dropbear
-        # Multi extra port via -p, plus banner MOTD via -b
+        # Multi extra port via -p
         sed -i '/^#\?DROPBEAR_EXTRA_ARGS=/d' /etc/default/dropbear
-        echo 'DROPBEAR_EXTRA_ARGS="-p 143 -p 300 -p 1153 -b /etc/issue.net"' >> /etc/default/dropbear
+        echo 'DROPBEAR_EXTRA_ARGS="-p 143 -p 300 -p 1153"' >> /etc/default/dropbear
     fi
     # Generate DSS host key jika belum ada
     if [[ ! -f /etc/dropbear/dropbear_dss_host_key ]]; then
@@ -2458,7 +2327,6 @@ do_install_all() {
 
     # Setup menu command
     setup_menu_cmd
-    install_ssh_splash
 
     # Tulis version
     echo "$SCRIPT_VERSION" > "$VERSIONF"
@@ -4307,61 +4175,6 @@ tool_cleaner() {
     pause
 }
 
-tool_set_banner() {
-    show_header
-    _top; _btn "  ${IT}${AL}🎨  GANTI BANNER MOTD${NC}"; _bot; echo ""
-    echo -e "  ${DIM}Banner saat ini:${NC}"
-    if [[ -s /etc/issue.net ]]; then
-        cat /etc/issue.net
-    else
-        echo "  (kosong)"
-    fi
-    echo ""
-    echo -e "  ${A2}[1]${NC}  Edit /etc/issue.net (vi/nano)"
-    echo -e "  ${A2}[2]${NC}  Generate ulang dengan figlet"
-    echo -e "  ${A2}[3]${NC}  Restore default ${DIM}(MAX-PAN + RULES)${NC}"
-    echo -e "  ${LR}[0]${NC}  Batal"
-    echo ""
-    echo -ne "  ${A1}›${NC} "; read -r ch
-    case $ch in
-        1) ${EDITOR:-nano} /etc/issue.net ;;
-        2)
-            echo -ne "  ${A3}Teks banner${NC} [MAX PANEL]: "; read -r t
-            [[ -z "$t" ]] && t="MAX PANEL"
-            if command -v figlet &>/dev/null; then
-                figlet -f standard "$t" > /etc/issue.net
-                ok "Banner di-generate"
-            else
-                echo "$t" > /etc/issue.net
-                warn "figlet tidak ada — pakai teks polos"
-            fi
-            ;;
-        3)
-            write_default_banner
-            ok "Banner direset ke template MAX-PAN"
-            ;;
-        0|*) return ;;
-    esac
-
-    # Pastikan sshd Banner directive aktif & restart agar perubahan langsung tampil
-    if ! grep -qE '^[[:space:]]*Banner[[:space:]]+/etc/issue\.net' /etc/ssh/sshd_config 2>/dev/null; then
-        sed -i '/^#\?Banner[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
-        echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
-    fi
-    # Sinkron banner ke /etc/issue (console) & /etc/motd (post-auth) supaya
-    # OpenSSH PrintMotd & SSHWS TLS/NTLS via Dropbear ikut menampilkan.
-    cp -f /etc/issue.net /etc/issue 2>/dev/null
-    cp -f /etc/issue.net /etc/motd  2>/dev/null
-    # Pastikan hook profile.d / bash.bashrc ter-install (idempotent) supaya
-    # banner muncul juga di SSHWS TLS/NTLS via Dropbear (banyak client WS
-    # tidak menampilkan pre-auth banner Dropbear -b).
-    _install_banner_hooks
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-    systemctl restart dropbear 2>/dev/null
-    ok "SSH & Dropbear di-restart — banner aktif (termasuk SSHWS TLS/NTLS)"
-    pause
-}
-
 tool_set_limit() {
     show_header
     _top; _btn "  ${IT}${AL}🚦  LIMIT TOTAL USER${NC}"; _bot; echo ""
@@ -5428,7 +5241,6 @@ menu_system() {
         _sep; _btn "  ${A2}[7]${NC}  🔄  Restart Semua Service"
         _sep; _btn "  ${A2}[8]${NC}  🔍  Check Status Service"
         _sep; _btn "  ${A2}[9]${NC}  🧽  Cleaner (log/cache)"
-        _sep; _btn "  ${A2}[A]${NC}  🎨  Ganti Banner MOTD"
         _sep; _btn "  ${A2}[B]${NC}  🚦  Limit Total User"
         _sep; _btn "  ${LR}[0]${NC}  ◀   Kembali"
         _bot; echo ""
@@ -5437,7 +5249,7 @@ menu_system() {
             1) tool_bbr ;;       2) tool_ipv6 ;;     3) tool_speedtest ;;
             4) tool_sysinfo ;;   5) tool_reboot_sched ;;
             6) tool_bandwidth ;; 7) tool_restart_all ;; 8) tool_check_service ;;
-            9) tool_cleaner ;;   a) tool_set_banner ;; b) tool_set_limit ;;
+            9) tool_cleaner ;;   b) tool_set_limit ;;
             0) break ;; *) warn "Pilihan tidak valid"; sleep 1 ;;
         esac
     done
@@ -5478,7 +5290,7 @@ menu_backup() {
 }
 
 # ════════════════════════════════════════════════════════════
-#  MENU Settings (domain, bot, store, banner)
+#  MENU Settings (domain, bot, store)
 # ════════════════════════════════════════════════════════════
 menu_settings() {
     while true; do
@@ -5489,14 +5301,13 @@ menu_settings() {
         _sep; _btn "  ${A2}[3]${NC}  🤖  Setup Telegram Bot"
         _sep; _btn "  ${A2}[4]${NC}  📡  Tes Telegram Bot"
         _sep; _btn "  ${A2}[5]${NC}  🛒  Set Toko/Brand"
-        _sep; _btn "  ${A2}[6]${NC}  🎨  Ganti Banner MOTD"
         _sep; _btn "  ${LR}[0]${NC}  ◀   Kembali"
         _bot; echo ""
         echo -ne "  ${A1}›${NC} "; read -r ch
         case $ch in
             1) domain_set ;; 2) domain_issue_ssl ;;
             3) tg_setup ;;   4) tg_test ;;
-            5) store_setup ;; 6) tool_set_banner ;;
+            5) store_setup ;;
             0) break ;; *) warn "Pilihan tidak valid"; sleep 1 ;;
         esac
     done
@@ -5639,12 +5450,20 @@ do_uninstall() {
 
     # Hapus splash dari bashrc
     sed -i '/MAX-PANEL-SPLASH/,+1d' /root/.bashrc 2>/dev/null
+    sed -i '/MAX-PANEL-SPLASH/d'    /root/.bashrc 2>/dev/null
+    sed -i '/max-panel-splash/d'    /root/.bashrc 2>/dev/null
     sed -i "/alias menu-max=/d;/alias max-menu=/d" /root/.bashrc 2>/dev/null
 
-    # Hapus banner hook (profile.d, bash.bashrc, /etc/profile loader)
+    # Hapus banner hook (profile.d, bash.bashrc, /etc/profile loader, sshd_config, splash file)
+    rm -f /etc/issue.net /etc/motd /etc/max-panel-splash.sh 2>/dev/null
+    : > /etc/issue 2>/dev/null  # kosongkan, jangan hapus (file sistem)
     rm -f /etc/profile.d/00-maxpan-banner.sh 2>/dev/null
     sed -i '/^# >>> MAXPANEL-BANNER >>>$/,/^# <<< MAXPANEL-BANNER <<<$/d' /etc/bash.bashrc 2>/dev/null
     sed -i '/^# >>> MAXPANEL-PROFILE-LOADER >>>$/,/^# <<< MAXPANEL-PROFILE-LOADER <<<$/d' /etc/profile 2>/dev/null
+    sed -i '/^Banner[[:space:]]\+\/etc\/issue\.net$/d' /etc/ssh/sshd_config 2>/dev/null
+    sed -i '/^PrintMotd[[:space:]]\+yes$/d' /etc/ssh/sshd_config 2>/dev/null
+    systemctl restart ssh 2>/dev/null
+    systemctl restart dropbear 2>/dev/null
 
     # Hapus user yang dibuat panel (SSH/OpenVPN/SlowDNS DB)
     for db in "$SSH_DB" "$OVPN_DB" "$SLOW_DB"; do
@@ -5686,57 +5505,8 @@ PROFEOF
 }
 
 # ════════════════════════════════════════════════════════════
-#  SSH SPLASH (auto-tampil saat SSH login)
+#  (SSH SPLASH dihilangkan — user tidak pakai banner/splash)
 # ════════════════════════════════════════════════════════════
-install_ssh_splash() {
-    cat > /etc/max-panel-splash.sh <<'SPLASH'
-#!/bin/bash
-# MAX-PANEL splash — auto-generated, jangan diedit manual
-
-THEMEF="/etc/maxpanel/theme.conf"
-NC='\033[0m'; BLD='\033[1m'; DIM='\033[2m'
-cur_theme=$(cat "$THEMEF" 2>/dev/null || echo 1)
-case "$cur_theme" in
-    7)  L1='\033[38;5;196m'; L2='\033[38;5;214m'; L3='\033[38;5;226m'
-        L4='\033[38;5;82m';  L5='\033[38;5;51m'
-        A1='\033[38;5;82m';  A2='\033[38;5;82m';  A3='\033[38;5;226m'; A4='\033[38;5;51m' ;;
-    2)  L1='\033[38;5;51m';  L2='\033[38;5;51m';  L3='\033[0;36m'
-        L4='\033[38;5;51m';  L5='\033[0;36m'
-        A1='\033[38;5;51m';  A2='\033[1;36m';     A3='\033[0;36m';     A4='\033[38;5;123m' ;;
-    *)  L1='\033[1;37m';     L2='\033[1;37m';     L3='\033[1;33m'
-        L4='\033[1;37m';     L5='\033[1;33m'
-        A1='\033[1;34m';     A2='\033[1;32m';     A3='\033[1;33m';     A4='\033[1;36m' ;;
-esac
-DASH="───────────────────────────────────────────────────────────────"
-clear
-echo ""
-echo -e "  ${A1}${DASH}${NC}"
-echo -e "  ${L1}${BLD}  ███╗   ███╗ █████╗ ██╗  ██╗    ██████╗  █████╗ ███╗   ██╗ ${NC}"
-echo -e "  ${L2}${BLD}  ████╗ ████║██╔══██╗╚██╗██╔╝    ██╔══██╗██╔══██╗████╗  ██║ ${NC}"
-echo -e "  ${L3}${BLD}  ██╔████╔██║███████║ ╚███╔╝     ██████╔╝███████║██╔██╗ ██║ ${NC}"
-echo -e "  ${L4}${BLD}  ██║╚██╔╝██║██╔══██║ ██╔██╗     ██╔═══╝ ██╔══██║██║╚██╗██║ ${NC}"
-echo -e "  ${L5}${BLD}  ██║ ╚═╝ ██║██║  ██║██╔╝ ██╗    ██║     ██║  ██║██║ ╚████║ ${NC}"
-echo -e "  ${DIM}  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝    ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝ ${NC}"
-echo -e "  ${A1}${DASH}${NC}"
-echo ""
-echo -e "  ${A4}      ✦  * MAX PREMIUM TUNNELING PANEL *  ✦      ${NC}"
-echo -e "  ${DIM}     +------------ ${A2}[ ALL-IN-ONE ]${DIM} ------------+    ${NC}"
-echo ""
-echo -e "  ${A1}${DASH}${NC}"
-echo -e "  ${DIM}            ✦  MAX PANEL — chanelog/max  ✦            ${NC}"
-echo -e "  ${A1}${DASH}${NC}"
-echo ""
-echo -e "       ${A3}type ${BLD}menu-max${NC}${A3} to continue${NC}"
-echo ""
-SPLASH
-
-    chmod +x /etc/max-panel-splash.sh
-
-    sed -i '/# MAX-PANEL-SPLASH/d' /root/.bashrc 2>/dev/null
-    sed -i '/max-panel-splash/d'   /root/.bashrc 2>/dev/null
-    echo '# MAX-PANEL-SPLASH' >> /root/.bashrc
-    echo 'bash /etc/max-panel-splash.sh' >> /root/.bashrc
-}
 
 # ════════════════════════════════════════════════════════════
 #  CLI FLAG HANDLER (untuk cron / first-run)
@@ -5832,6 +5602,8 @@ mkdir -p "$DIR" "$LOGDIR" "$BACKUPDIR"
 
 # Theme & touch DB files
 load_theme
+# Bersihkan jejak banner dari install lama (idempotent)
+_purge_legacy_banner 2>/dev/null
 for f in "$MLDB" "$SSH_DB" "$VMESS_DB" "$VLESS_DB" "$TROJAN_DB" \
          "$TROJANGO_DB" "$OVPN_DB" "$WG_DB" "$HY_DB" "$SS_DB" "$SLOW_DB"; do
     [[ ! -f "$f" ]] && touch "$f"
@@ -5853,11 +5625,6 @@ fi
 # Setup symlink command kalau belum
 if [[ ! -x /usr/local/bin/max-menu ]]; then
     setup_menu_cmd 2>/dev/null
-fi
-
-# Splash install (sekali)
-if [[ ! -f /etc/max-panel-splash.sh ]]; then
-    install_ssh_splash 2>/dev/null
 fi
 
 # Langsung buka menu utama
