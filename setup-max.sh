@@ -1175,6 +1175,40 @@ install_deps() {
 }
 
 # ════════════════════════════════════════════════════════════
+#  BANNER MOTD — MAX-PAN (tampil setiap SSH konek)
+# ════════════════════════════════════════════════════════════
+# Tulis banner default ala MAX-PAN ke /etc/issue.net.
+# Format: warna ANSI tetap dipakai supaya cantik di terminal,
+# dan plain-text fallback kalau client tidak support warna.
+write_default_banner() {
+    local target="${1:-/etc/issue.net}"
+    cat > "$target" <<'BANNER_EOF'
+
+  [1;36m============================[0m
+  [1;33m       MAX-PAN SSH[0m
+  [1;36m============================[0m
+  [1;31m         - RULES -[0m
+
+      [1;37mNO MULTILOGIN[0m
+      [1;37mNO PORN 18+[0m
+      [1;37mNO DDOS[0m
+      [1;37mNO TORRENT[0m
+      [1;37mNO HACKING[0m
+      [1;37mNO SPAM[0m
+      [1;37mNO CARDING[0m
+
+  [1;31m   MELANGGAR AUTO BANNED[0m
+  [1;36m============================[0m
+  [1;32m ORDER: wa.me/6283825566891[0m
+  [1;36m============================[0m
+
+BANNER_EOF
+    chmod 644 "$target" 2>/dev/null
+    # Sinkronkan ke /etc/issue (login lokal/console) juga supaya konsisten
+    cp -f "$target" /etc/issue 2>/dev/null
+}
+
+# ════════════════════════════════════════════════════════════
 #  INSTALLER — SSH + Dropbear + Stunnel
 # ════════════════════════════════════════════════════════════
 install_ssh() {
@@ -1192,6 +1226,16 @@ install_ssh() {
     # PermitRoot login & password auth (sesuaikan)
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
+
+    # ── Banner MOTD: tampil setiap kali SSH konek (sebelum prompt password) ──
+    # Pasang banner default MAX-PAN bila /etc/issue.net belum ada / kosong
+    if [[ ! -s /etc/issue.net ]]; then
+        write_default_banner
+    fi
+    # Pastikan directive Banner aktif (idempotent)
+    sed -i '/^#\?Banner[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
+    echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
+
     # Buka firewall (kalau ufw aktif)
     for p in 22 99 169 2269 3369; do
         ufw allow "$p"/tcp &>/dev/null || true
@@ -1206,9 +1250,9 @@ install_ssh() {
         # Hapus semua baris DROPBEAR_PORT (termasuk yang di-comment) lalu tambah baru
         sed -i '/^#\?DROPBEAR_PORT=/d' /etc/default/dropbear
         echo 'DROPBEAR_PORT=109' >> /etc/default/dropbear
-        # Multi extra port via -p
+        # Multi extra port via -p, plus banner MOTD via -b
         sed -i '/^#\?DROPBEAR_EXTRA_ARGS=/d' /etc/default/dropbear
-        echo 'DROPBEAR_EXTRA_ARGS="-p 143 -p 300 -p 1153"' >> /etc/default/dropbear
+        echo 'DROPBEAR_EXTRA_ARGS="-p 143 -p 300 -p 1153 -b /etc/issue.net"' >> /etc/default/dropbear
     fi
     # Generate DSS host key jika belum ada
     if [[ ! -f /etc/dropbear/dropbear_dss_host_key ]]; then
@@ -4154,11 +4198,15 @@ tool_set_banner() {
     show_header
     _top; _btn "  ${IT}${AL}🎨  GANTI BANNER MOTD${NC}"; _bot; echo ""
     echo -e "  ${DIM}Banner saat ini:${NC}"
-    head -10 /etc/issue.net 2>/dev/null || echo "  (kosong)"
+    if [[ -s /etc/issue.net ]]; then
+        cat /etc/issue.net
+    else
+        echo "  (kosong)"
+    fi
     echo ""
     echo -e "  ${A2}[1]${NC}  Edit /etc/issue.net (vi/nano)"
     echo -e "  ${A2}[2]${NC}  Generate ulang dengan figlet"
-    echo -e "  ${A2}[3]${NC}  Restore default"
+    echo -e "  ${A2}[3]${NC}  Restore default ${DIM}(MAX-PAN + RULES)${NC}"
     echo -e "  ${LR}[0]${NC}  Batal"
     echo ""
     echo -ne "  ${A1}›${NC} "; read -r ch
@@ -4176,10 +4224,20 @@ tool_set_banner() {
             fi
             ;;
         3)
-            echo "Welcome to MAX PANEL VPS" > /etc/issue.net
-            ok "Banner direset"
+            write_default_banner
+            ok "Banner direset ke template MAX-PAN"
             ;;
+        0|*) return ;;
     esac
+
+    # Pastikan sshd Banner directive aktif & restart agar perubahan langsung tampil
+    if ! grep -qE '^[[:space:]]*Banner[[:space:]]+/etc/issue\.net' /etc/ssh/sshd_config 2>/dev/null; then
+        sed -i '/^#\?Banner[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
+        echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
+    fi
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+    systemctl restart dropbear 2>/dev/null
+    ok "SSH & Dropbear di-restart — banner aktif"
     pause
 }
 
