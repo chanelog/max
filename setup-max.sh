@@ -8,16 +8,18 @@
 # ════════════════════════════════════════════════════════════
 #
 #   Protokol terinstall:
-#     • OpenSSH (22)                • Dropbear (109, 143)
-#     • Stunnel SSL (445, 777)      • Nginx HTTP/TLS (81, 443, 8443)
-#     • Squid Proxy (80, 8000, 3128) — support SSH-over-Proxy (CONNECT)
-#     • SSH WebSocket via Nginx     → /cdn (CDN-ready: 81, 443, 8880)
-#     • SSH WebSocket via Squid     → CONNECT host:80 → 127.0.0.1:8881
+#     • OpenSSH (22, 99, 169, 2269, 3369)
+#     • Dropbear (109, 143, 300, 1153)
+#     • Stunnel SSL (8000) → Dropbear:109
+#     • SSLH multiplexer (8000) → SSH / SSL / HTTP / WS
+#     • Nginx HTTP/TLS (80, 89, 443, 8880)
+#     • SSH WebSocket via Nginx     → /cdn (CDN-ready: 80, 443, 8880)
 #     • OpenVPN (TCP 1194 / UDP 2200)
-#     • Xray VMess/VLess/Trojan WS+gRPC + Shadowsocks (8388)
+#     • Xray VMess/VLess/Trojan WS+gRPC (TLS:443 + HTTP:80) + Shadowsocks
 #     • Trojan-Go (2087)            • BadVPN UDPGW (7100/7200/7300)
 #     • Hysteria 2 (UDP 36712 + range 6000-19999)
-#     • SlowDNS (53 → 5300)         • WireGuard (UDP 51820)
+#     • SlowDNS (53 → 5300, 2269, 3369)
+#     • WireGuard (UDP 51820)
 #     • OHP (8080) — opsional
 #
 #   Optimasi kernel (auto):
@@ -571,20 +573,21 @@ _tg_render_ssh() {
 ────────────────────────────────────
 🖥 <b>IP Publik</b> : <code>$(_tg_esc "$ip")</code>
 🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
-🔌 <b>Port SSH</b> : <code>22</code>
-🔌 <b>Dropbear</b> : <code>109, 143</code>
-🔒 <b>SSL/Stun.</b>: <code>445, 777</code>
-🟢 <b>Squid</b>    : <code>80, 8000, 3128</code>
-🔌 <b>WS HTTP</b>  : <code>81 (/cdn)</code>
-🔒 <b>WS HTTPS</b> : <code>443 (/cdn)</code>
-🔌 <b>WS NTLS</b>  : <code>8880 (/cdn)</code>
-🟢 <b>WS Squid</b> : <code>80 (CONNECT → SSH/Dropbear)</code>
+🔌 <b>OpenSSH</b>  : <code>22, 99, 169, 2269, 3369</code>
+🔌 <b>Dropbear</b> : <code>109, 143, 300, 1153</code>
+🟢 <b>SSH DIRECT</b>: <code>8000</code>
+🔌 <b>WS HTTP</b>  : <code>80, 8880, 8000 (/cdn)</code>
+🔒 <b>WS SSL/TLS</b>: <code>443, 8000 (/cdn)</code>
+🔒 <b>SSLH</b>     : <code>8000</code>
+🔒 <b>STUNNEL5</b> : <code>8000</code>
+🐢 <b>SlowDNS</b>  : <code>5300, 2269, 3369</code>
+📡 <b>UDPGW</b>    : <code>7100, 7200, 7300</code>
+🌐 <b>Nginx</b>    : <code>80, 443, 89</code>
 ────────────────────────────────────
 ☁️ <b>CDN TLS</b>  : <code>$(_tg_esc "$dom"):443:/cdn</code>
 ☁️ <b>CDN NTLS</b> : <code>$(_tg_esc "$dom"):8880:/cdn</code>
-🟢 <b>SSH Squid</b>: <code>$(_tg_esc "$dom"):80 (proxy CONNECT)</code>
+🟢 <b>SSH MUX</b>  : <code>$(_tg_esc "$dom"):8000 (auto-detect SSH/SSL/WS)</code>
 📡 <b>OpenVPN</b>  : <code>TCP 1194 / UDP 2200</code>
-📡 <b>UDPGW</b>    : <code>7100, 7200, 7300</code>
 ────────────────────────────────────
 🐛 <b>Payload Bug Rekomendasi</b>
 
@@ -598,9 +601,8 @@ _tg_render_ssh() {
 <b>3. Direct TLS (port 443) — Plain WS</b>
 <code>GET /cdn HTTP/1.1[crlf]Host: $(_tg_esc "$dom")[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]</code>
 
-<b>4. Squid Proxy (port 80) — CONNECT</b>
-<code>CONNECT 127.0.0.1:109 HTTP/1.1[crlf]Host: 127.0.0.1[crlf][crlf]</code>
-<i>Proxy: <code>$(_tg_esc "$dom"):80</code> — target Dropbear:109 atau SSH:22</i>
+<b>4. Tanpa Payload — SSH DIRECT (port 8000)</b>
+<i>Konek SSH/SSL langsung ke <code>$(_tg_esc "$dom"):8000</code> (auto-detect via SSLH)</i>
 ────────────────────────────────────
 🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
 📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
@@ -643,8 +645,8 @@ _tg_render_vless() {
     local L1 L2 L3 L4
     L1="vless://${uuid}@${dom}:443?path=/vless&security=tls&encryption=none&host=${dom}&type=ws&sni=${dom}#${u}-TLS"
     L2="vless://${uuid}@${dom}:80?path=/vless&encryption=none&host=${dom}&type=ws#${u}-HTTP"
-    L3="vless://${uuid}@${dom}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC"
-    L4="vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-ALT"
+    L3="vless://${uuid}@${dom}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-TLS"
+    L4="vless://${uuid}@${dom}:80?mode=gun&encryption=none&type=grpc&serviceName=vless-grpc#${u}-gRPC-HTTP"
     cat <<EOF
 ✅ <b>Akun VLess — ${brand}</b>
 ────────────────────────────────────
@@ -653,7 +655,8 @@ _tg_render_vless() {
 🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
 🔌 <b>Port TLS</b> : <code>443 (WS)</code>
 🔌 <b>Port HTTP</b>: <code>80 (WS)</code>
-🔌 <b>gRPC TLS</b> : <code>443, 8443</code>
+🔌 <b>gRPC TLS</b> : <code>443</code>
+🔌 <b>gRPC HTTP</b>: <code>80</code>
 🛣 <b>WS Path</b>  : <code>/vless</code>
 🛣 <b>gRPC SVC</b> : <code>vless-grpc</code>
 🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
@@ -668,7 +671,7 @@ _tg_render_vless() {
 🔗 <b>VLess gRPC TLS</b>:
 <code>$(_tg_esc "$L3")</code>
 
-🔗 <b>VLess gRPC ALT (8443)</b>:
+🔗 <b>VLess gRPC HTTP</b>:
 <code>$(_tg_esc "$L4")</code>
 EOF
 }
@@ -678,9 +681,10 @@ _tg_render_trojan() {
     local u="$1" pw="$2" exp="$3" maxl="${4:-2}"
     local dom brand; dom=$(get_domain); brand=$(_tg_brand)
     local L1 L2 L3
-    L1="trojan://${pw}@${dom}:443?path=/trojan-ws&security=tls&host=${dom}&type=ws&sni=${dom}#${u}-WS"
-    L2="trojan://${pw}@${dom}:443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC"
-    L3="trojan://${pw}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-ALT"
+    L1="trojan://${pw}@${dom}:443?path=/trojan-ws&security=tls&host=${dom}&type=ws&sni=${dom}#${u}-WS-TLS"
+    L2="trojan://${pw}@${dom}:80?path=/trojan-ws&host=${dom}&type=ws#${u}-WS-HTTP"
+    L3="trojan://${pw}@${dom}:443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-TLS"
+    L4="trojan://${pw}@${dom}:80?mode=gun&type=grpc&serviceName=trojan-grpc#${u}-gRPC-HTTP"
     cat <<EOF
 ✅ <b>Akun Trojan — ${brand}</b>
 ────────────────────────────────────
@@ -688,7 +692,9 @@ _tg_render_trojan() {
 🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
 🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
 🔌 <b>Port TLS</b> : <code>443 (WS)</code>
-🔌 <b>gRPC TLS</b> : <code>443, 8443</code>
+🔌 <b>Port HTTP</b>: <code>80 (WS)</code>
+🔌 <b>gRPC TLS</b> : <code>443</code>
+🔌 <b>gRPC HTTP</b>: <code>80</code>
 🛣 <b>WS Path</b>  : <code>/trojan-ws</code>
 🛣 <b>gRPC SVC</b> : <code>trojan-grpc</code>
 🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
@@ -697,32 +703,42 @@ _tg_render_trojan() {
 🔗 <b>Trojan WS TLS</b>:
 <code>$(_tg_esc "$L1")</code>
 
-🔗 <b>Trojan gRPC TLS</b>:
+🔗 <b>Trojan WS HTTP</b>:
 <code>$(_tg_esc "$L2")</code>
 
-🔗 <b>Trojan gRPC ALT (8443)</b>:
+🔗 <b>Trojan gRPC TLS</b>:
 <code>$(_tg_esc "$L3")</code>
+
+🔗 <b>Trojan gRPC HTTP</b>:
+<code>$(_tg_esc "$L4")</code>
 EOF
 }
 
-# Shadowsocks detail + ss:// link
+# Shadowsocks detail + ss:// link (direct, WS, gRPC)
 _tg_render_ss() {
     local u="$1" pw="$2" exp="$3" maxl="${4:-2}"
     local dom brand; dom=$(get_domain); brand=$(_tg_brand)
-    local b64; b64=$(printf '%s' "aes-128-gcm:${pw}@${dom}:8388" | base64 -w0)
+    local b64 b64ws b64grpc
+    b64=$(printf '%s' "aes-128-gcm:${pw}@${dom}:8388" | base64 -w0)
+    b64ws=$(printf '%s' "aes-128-gcm:${pw}@${dom}:443" | base64 -w0)
     cat <<EOF
 ✅ <b>Akun Shadowsocks — ${brand}</b>
 ────────────────────────────────────
 👤 <b>Username</b> : <code>$(_tg_esc "$u")</code>
 🔑 <b>Password</b> : <code>$(_tg_esc "$pw")</code>
 🌐 <b>Host</b>     : <code>$(_tg_esc "$dom")</code>
-🔌 <b>Port</b>     : <code>8388</code>
+🔌 <b>SS Direct</b>: <code>8388</code>
+🔌 <b>SS WS</b>    : <code>443 (TLS), 80 (HTTP) — path /ss-ws</code>
+🔌 <b>SS gRPC</b>  : <code>443 (TLS), 80 (HTTP) — svc ss-grpc</code>
 🔐 <b>Method</b>   : <code>aes-128-gcm</code>
 🔒 <b>MaxLogin</b> : <code>${maxl} device</code>
 📅 <b>Expired</b>  : <code>$(_tg_esc "$exp")</code>
 ────────────────────────────────────
-🔗 <b>Link SS</b>:
+🔗 <b>SS Direct</b>:
 <code>ss://${b64}#$(_tg_esc "$u")</code>
+
+🔗 <b>SS WS-TLS (port 443)</b>:
+<code>ss://${b64ws}?plugin=v2ray-plugin%3Btls%3Bhost%3D${dom}%3Bpath%3D%2Fss-ws#$(_tg_esc "$u")-WS-TLS</code>
 EOF
 }
 
@@ -943,12 +959,13 @@ draw_vps() {
     echo -e "  ${A1}${_DASH}${NC}"
 
     # Service status row
-    local ssh_b dr_b stun_b xray_b tgo_b hy_b ovpn_b wg_b
+    local ssh_b dr_b stun_b sslh_b ngx_b xray_b tgo_b hy_b ovpn_b wg_b
     ssh_b=$(svc_badge ssh);        dr_b=$(svc_badge dropbear)
     stun_b=$(svc_badge stunnel4);  xray_b=$(svc_badge xray)
+    sslh_b=$(svc_badge sslh);      ngx_b=$(svc_badge nginx)
     tgo_b=$(svc_badge trojan-go);  hy_b=$(svc_badge hysteria-server)
     ovpn_b=$(svc_badge openvpn);   wg_b=$(svc_badge "wg-quick@wg0")
-    _btn "  ${DIM}SSH${NC}${ssh_b} ${DIM}DR${NC}${dr_b} ${DIM}STN${NC}${stun_b} ${DIM}XRY${NC}${xray_b} ${DIM}TGO${NC}${tgo_b} ${DIM}HY${NC}${hy_b} ${DIM}OVPN${NC}${ovpn_b} ${DIM}WG${NC}${wg_b}"
+    _btn "  ${DIM}SSH${NC}${ssh_b} ${DIM}DR${NC}${dr_b} ${DIM}STN${NC}${stun_b} ${DIM}SLH${NC}${sslh_b} ${DIM}NGX${NC}${ngx_b} ${DIM}XRY${NC}${xray_b} ${DIM}TGO${NC}${tgo_b} ${DIM}HY${NC}${hy_b} ${DIM}OVPN${NC}${ovpn_b} ${DIM}WG${NC}${wg_b}"
     echo -e "  ${A1}${_DASH}${NC}"
 
     _btn "  ${DIM}AKUN${NC} ${A3}${total}${NC}  ${A1}│${NC}  ${DIM}EXP${NC} ${LR}${expc}${NC}  ${A1}│${NC}  ${DIM}TEMA${NC}  ${tema_display}"
@@ -981,19 +998,20 @@ show_box_ssh() {
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} 🖥  ${DIM}IP Publik${NC} : ${LG}%s${NC}\n" "$ip"
     printf  "  ${A1}│${NC} 🌐 ${DIM}Host    ${NC} : ${W}%s${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}Port SSH ${NC}: ${Y}22${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}Dropbear ${NC}: ${Y}109, 143${NC}\n"
-    printf  "  ${A1}│${NC} 🔒 ${DIM}SSL/Stun.${NC}: ${Y}445, 777${NC}\n"
-    printf  "  ${A1}│${NC} 🟢 ${DIM}Squid    ${NC}: ${Y}80, 8000, 3128${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}81 (/cdn)${NC}\n"
-    printf  "  ${A1}│${NC} 🔒 ${DIM}WS HTTPS ${NC}: ${Y}443 (/cdn)${NC}\n"
-    printf  "  ${A1}│${NC} 🔌 ${DIM}WS NTLS  ${NC}: ${Y}8880 (/cdn)${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}OpenSSH  ${NC}: ${Y}22, 99, 169, 2269, 3369${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}Dropbear ${NC}: ${Y}109, 143, 300, 1153${NC}\n"
+    printf  "  ${A1}│${NC} 🟢 ${DIM}SSH DRCT ${NC}: ${Y}8000${NC}\n"
+    printf  "  ${A1}│${NC} 🔌 ${DIM}WS HTTP  ${NC}: ${Y}80, 8880, 8000 (/cdn)${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}WS SSL/TLS${NC}: ${Y}443, 8000 (/cdn)${NC}\n"
+    printf  "  ${A1}│${NC} 🔒 ${DIM}SSLH/STN ${NC}: ${Y}8000${NC}\n"
+    printf  "  ${A1}│${NC} 🐢 ${DIM}SlowDNS  ${NC}: ${Y}5300, 2269, 3369${NC}\n"
+    printf  "  ${A1}│${NC} 📡 ${DIM}UDPGW    ${NC}: ${Y}7100, 7200, 7300${NC}\n"
+    printf  "  ${A1}│${NC} 🌐 ${DIM}Nginx    ${NC}: ${Y}80, 443, 89${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} ☁️  ${DIM}CDN TLS  ${NC}: ${Y}%s:443:/cdn${NC}\n" "$dom"
     printf  "  ${A1}│${NC} ☁️  ${DIM}CDN NTLS ${NC}: ${Y}%s:8880:/cdn${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} 🟢 ${DIM}SSH Squid${NC}: ${Y}%s:80 (CONNECT)${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} 🟢 ${DIM}SSH MUX  ${NC}: ${Y}%s:8000${NC} ${DIM}(SSLH auto-detect)${NC}\n" "$dom"
     printf  "  ${A1}│${NC} 📡 ${DIM}OpenVPN  ${NC}: ${Y}TCP 1194 / UDP 2200${NC}\n"
-    printf  "  ${A1}│${NC} 📡 ${DIM}UDPGW    ${NC}: ${Y}7100, 7200, 7300${NC}\n"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} 🐛 ${DIM}Payload Bug Rekomendasi:${NC}\n"
     printf  "  ${A1}│${NC} ${BLD}${A2}1. CDN TLS (443) — SNI Cloudflare${NC}\n"
@@ -1003,9 +1021,8 @@ show_box_ssh() {
     printf  "  ${A1}│${NC}   ${A3}GET wss://cdn.cloudflare.net/cdn HTTP/1.1[crlf]Host: %s[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]${NC}\n" "$dom"
     printf  "  ${A1}│${NC} ${BLD}${A2}3. Direct TLS — Plain WS${NC}\n"
     printf  "  ${A1}│${NC}   ${A3}GET /cdn HTTP/1.1[crlf]Host: %s[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]${NC}\n" "$dom"
-    printf  "  ${A1}│${NC} ${BLD}${A2}4. Squid Proxy (80) — CONNECT${NC}\n"
-    printf  "  ${A1}│${NC}   ${A3}CONNECT 127.0.0.1:109 HTTP/1.1[crlf]Host: 127.0.0.1[crlf][crlf]${NC}\n"
-    printf  "  ${A1}│${NC}   ${DIM}Proxy: %s:80 → Dropbear:109 / SSH:22${NC}\n" "$dom"
+    printf  "  ${A1}│${NC} ${BLD}${A2}4. Tanpa Payload — SSH DIRECT 8000${NC}\n"
+    printf  "  ${A1}│${NC}   ${DIM}Konek SSH/SSL langsung ke %s:8000 (auto via SSLH)${NC}\n" "$dom"
     echo -e "  ${A1}├─────────────────────────────────────────────────────────${NC}"
     printf  "  ${A1}│${NC} 🔒 ${DIM}MaxLogin${NC} : ${Y}%s device${NC}\n" "$maxl"
     printf  "  ${A1}│${NC} 📅 ${DIM}Expired ${NC} : ${Y}%s${NC}\n" "$exp"
@@ -1039,12 +1056,15 @@ show_box_xray() {
         VLess)
             printf  "  ${A1}│${NC} 🔌 ${DIM}Port TLS ${NC}: ${Y}443 (WS)${NC}\n"
             printf  "  ${A1}│${NC} 🔌 ${DIM}Port HTTP${NC}: ${Y}80 (WS)${NC}\n"
-            printf  "  ${A1}│${NC} 🔌 ${DIM}gRPC TLS ${NC}: ${Y}8443${NC}\n"
+            printf  "  ${A1}│${NC} 🔌 ${DIM}gRPC TLS ${NC}: ${Y}443${NC}\n"
+            printf  "  ${A1}│${NC} 🔌 ${DIM}gRPC HTTP${NC}: ${Y}80${NC}\n"
             printf  "  ${A1}│${NC} 🛣  ${DIM}WS Path  ${NC}: ${Y}/vless${NC}\n"
             printf  "  ${A1}│${NC} 🛣  ${DIM}gRPC SVC ${NC}: ${Y}vless-grpc${NC}\n" ;;
         Trojan)
             printf  "  ${A1}│${NC} 🔌 ${DIM}Port TLS ${NC}: ${Y}443 (WS)${NC}\n"
-            printf  "  ${A1}│${NC} 🔌 ${DIM}gRPC TLS ${NC}: ${Y}8443${NC}\n"
+            printf  "  ${A1}│${NC} 🔌 ${DIM}Port HTTP${NC}: ${Y}80 (WS)${NC}\n"
+            printf  "  ${A1}│${NC} 🔌 ${DIM}gRPC TLS ${NC}: ${Y}443${NC}\n"
+            printf  "  ${A1}│${NC} 🔌 ${DIM}gRPC HTTP${NC}: ${Y}80${NC}\n"
             printf  "  ${A1}│${NC} 🛣  ${DIM}WS Path  ${NC}: ${Y}/trojan-ws${NC}\n"
             printf  "  ${A1}│${NC} 🛣  ${DIM}gRPC SVC ${NC}: ${Y}trojan-grpc${NC}\n" ;;
     esac
@@ -1068,7 +1088,7 @@ install_deps() {
         fail2ban git build-essential libssl-dev python3 python3-pip dnsutils socat \
         figlet toilet boxes lolcat speedtest-cli wireguard wireguard-tools resolvconf \
         qrencode bc iptables iptables-persistent netfilter-persistent ca-certificates \
-        gnupg2 lsof psmisc openssl python3-websockify squid 2>/dev/null || true
+        gnupg2 lsof psmisc openssl python3-websockify sslh 2>/dev/null || true
     # retry sekali lagi tanpa fail-on-missing untuk paket opsional
     apt-get install -y -qq nginx jq 2>/dev/null || true
     ok "Dependensi terpasang"
@@ -1078,31 +1098,37 @@ install_deps() {
 #  INSTALLER — SSH + Dropbear + Stunnel
 # ════════════════════════════════════════════════════════════
 install_ssh() {
-    inf "Konfigurasi OpenSSH (port 22 — bawaan)..."
-    # OpenSSH kembali ke port standar 22
-    sed -i 's/^#\?Port .*/Port 22/' /etc/ssh/sshd_config 2>/dev/null
-    grep -qE '^Port[[:space:]]+22$' /etc/ssh/sshd_config 2>/dev/null || \
-        echo "Port 22" >> /etc/ssh/sshd_config
-    # Bersihkan baris "Port 80" / "Port 443" / "Port 2222" jika ada (sisa install lama)
-    sed -i '/^Port[[:space:]]\+80$/d'   /etc/ssh/sshd_config 2>/dev/null
-    sed -i '/^Port[[:space:]]\+443$/d'  /etc/ssh/sshd_config 2>/dev/null
-    sed -i '/^Port[[:space:]]\+2222$/d' /etc/ssh/sshd_config 2>/dev/null
+    inf "Konfigurasi OpenSSH (multi-port: 22, 99, 169, 2269, 3369)..."
+    # Bersihkan SEMUA baris Port lama dulu
+    sed -i '/^#\?Port[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
+    # Tambah multi-port (urut sesuai foto)
+    {
+        echo "Port 22"
+        echo "Port 99"
+        echo "Port 169"
+        echo "Port 2269"
+        echo "Port 3369"
+    } >> /etc/ssh/sshd_config
     # PermitRoot login & password auth (sesuaikan)
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
+    # Buka firewall (kalau ufw aktif)
+    for p in 22 99 169 2269 3369; do
+        ufw allow "$p"/tcp &>/dev/null || true
+    done
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-    ok "OpenSSH siap: 22 (default)"
+    ok "OpenSSH siap: 22, 99, 169, 2269, 3369"
 
-    # ── Dropbear ─────────────────────────────────────────────────────────
-    inf "Konfigurasi Dropbear (port 109, 143 — bawaan klasik)..."
+    # ── Dropbear (multi-port) ───────────────────────────────────────────
+    inf "Konfigurasi Dropbear (multi-port: 109, 143, 300, 1153)..."
     if [[ -f /etc/default/dropbear ]]; then
         sed -i 's/^NO_START=.*/NO_START=0/' /etc/default/dropbear
         # Hapus semua baris DROPBEAR_PORT (termasuk yang di-comment) lalu tambah baru
         sed -i '/^#\?DROPBEAR_PORT=/d' /etc/default/dropbear
         echo 'DROPBEAR_PORT=109' >> /etc/default/dropbear
-        # Hapus semua baris DROPBEAR_EXTRA_ARGS lalu tambah baru
+        # Multi extra port via -p
         sed -i '/^#\?DROPBEAR_EXTRA_ARGS=/d' /etc/default/dropbear
-        echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
+        echo 'DROPBEAR_EXTRA_ARGS="-p 143 -p 300 -p 1153"' >> /etc/default/dropbear
     fi
     # Generate DSS host key jika belum ada
     if [[ ! -f /etc/dropbear/dropbear_dss_host_key ]]; then
@@ -1112,13 +1138,17 @@ install_ssh() {
     # Pastikan /bin/false dan /usr/sbin/nologin ada di /etc/shells
     grep -qx '/bin/false'         /etc/shells 2>/dev/null || echo '/bin/false'         >> /etc/shells
     grep -qx '/usr/sbin/nologin'  /etc/shells 2>/dev/null || echo '/usr/sbin/nologin'  >> /etc/shells
+    for p in 109 143 300 1153; do
+        ufw allow "$p"/tcp &>/dev/null || true
+    done
     systemctl enable dropbear &>/dev/null
     systemctl restart dropbear 2>/dev/null
-    ok "Dropbear siap: 109, 143"
+    ok "Dropbear siap: 109, 143, 300, 1153"
 
-    # ── Stunnel SSL ─────────────────────────────────────────────────────────
-    # FIX: port 443 dihandle Nginx (TLS termination). Stunnel HANYA listen di 445 & 777.
-    inf "Konfigurasi Stunnel SSL (port 445 → Dropbear:109, 777 → OpenSSH:22)..."
+    # ── Stunnel SSL ─────────────────────────────────────────────────────
+    # Listen di 127.0.0.1:7777 (internal). SSLH publik di :8000 yang akan
+    # forward TLS-handshake → stunnel:7777 → Dropbear:109.
+    inf "Konfigurasi Stunnel SSL (internal :7777 → Dropbear:109)..."
     mkdir -p /etc/stunnel
     if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
         openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
@@ -1138,24 +1168,18 @@ socket = a:SO_REUSEADDR=1
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 
-[dropbear-ssl-445]
-accept = 445
+[dropbear-ssl]
+accept = 127.0.0.1:7777
 connect = 127.0.0.1:109
-
-[openssh-ssl-777]
-accept = 777
-connect = 127.0.0.1:22
 STUN
     chmod 600 /etc/stunnel/stunnel.pem 2>/dev/null
-    # Aktifkan stunnel
     sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/stunnel4 2>/dev/null
     [[ -f /etc/default/stunnel4 ]] || echo "ENABLED=1" > /etc/default/stunnel4
     systemctl enable stunnel4 &>/dev/null
-    # Kill proses lama dulu sebelum restart
     pkill -9 stunnel4 2>/dev/null; rm -f /var/run/stunnel4/stunnel.pid
     sleep 1
     systemctl restart stunnel4 2>/dev/null
-    ok "Stunnel SSL siap: 445, 777"
+    ok "Stunnel internal siap (127.0.0.1:7777, di-mux via SSLH:8000)"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1197,9 +1221,9 @@ install_xray() {
     fi
 
     # Konfigurasi Xray
-    # FIX: konsolidasi ke 5 inbound (10001-10005) + SS @ 8388 sesuai spec port architecture.
+    # FIX: 7 inbound (10001-10007) + SS direct @ 8388 sesuai foto port architecture.
     # Semua WS/gRPC inbound listen di 127.0.0.1, TLS terminasi di Nginx pada port 443.
-    inf "Tulis konfigurasi Xray (5 inbound + SS)..."
+    inf "Tulis konfigurasi Xray (7 inbound + SS direct)..."
     cat > "$XRAY_CFG" <<'XCFG'
 {
   "log": {
@@ -1241,12 +1265,24 @@ install_xray() {
       "tag": "trojan-grpc"
     },
     {
+      "port": 10006, "listen": "127.0.0.1", "protocol": "shadowsocks",
+      "settings": {"clients": [], "network": "tcp,udp"},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/ss-ws"}},
+      "tag": "ss-ws"
+    },
+    {
+      "port": 10007, "listen": "127.0.0.1", "protocol": "shadowsocks",
+      "settings": {"clients": [], "network": "tcp,udp"},
+      "streamSettings": {"network": "grpc", "grpcSettings": {"serviceName": "ss-grpc"}},
+      "tag": "ss-grpc"
+    },
+    {
       "port": 8388, "protocol": "shadowsocks",
       "settings": {
         "clients": [],
         "network": "tcp,udp"
       },
-      "tag": "ss-2022"
+      "tag": "ss-direct"
     }
   ],
   "outbounds": [
@@ -1727,13 +1763,19 @@ SLDEOF
         systemctl daemon-reload
         systemctl enable slowdns &>/dev/null
 
-        # Redirect port 53 UDP → 5300
+        # Redirect port 53 UDP → 5300 (DNS bypass tunnel)
         iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null \
             || iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+        # Redirect port 2269 & 3369 UDP → 5300 (multi-port slowdns)
+        for sp in 2269 3369; do
+            iptables -t nat -C PREROUTING -p udp --dport "$sp" -j REDIRECT --to-ports 5300 2>/dev/null \
+                || iptables -t nat -A PREROUTING -p udp --dport "$sp" -j REDIRECT --to-ports 5300
+            iptables -I INPUT -p udp --dport "$sp" -j ACCEPT 2>/dev/null
+        done
         netfilter-persistent save &>/dev/null
 
         systemctl restart slowdns 2>/dev/null
-        ok "SlowDNS aktif (port 53 → 5300)"
+        ok "SlowDNS aktif (port 53, 5300, 2269, 3369 → SSH:22)"
     fi
 }
 
@@ -1742,7 +1784,7 @@ SLDEOF
 # ════════════════════════════════════════════════════════════
 # FIX: Python ws-proxy diganti dengan binary Go `ws` (ws-epro v1.2.1) +
 #      service `ws.service` dari repo chanelog/max. Listen di
-#      127.0.0.1:8881 → Dropbear:109 (path /cdn via Nginx & via Squid CONNECT).
+#      127.0.0.1:8881 → Dropbear:109 (path /cdn via Nginx & via SSLH:8000).
 install_ws_proxy() {
     inf "Install WebSocket binary (ws-epro)..."
     mkdir -p "$WS_DIR"
@@ -1779,7 +1821,7 @@ install_ws_proxy() {
     # Listen 127.0.0.1:8881 → Dropbear:109 (Nginx terminasi TLS & route /cdn)
     cat > "$TUN_CONF" <<'TUNCONF'
 # MAX PANEL — ws-epro config
-# Internal listener untuk reverse-proxy Nginx (path /cdn) & Squid CONNECT.
+# Internal listener untuk reverse-proxy Nginx (path /cdn) & SSLH multiplexer.
 # Jangan expose port ini langsung ke publik.
 listen:
   - listen_port: 8881
@@ -1828,127 +1870,62 @@ WSSVC
     # --- Verifikasi ----------------------------------------------------------
     sleep 1
     if systemctl is-active --quiet ws.service; then
-        ok "ws-epro aktif di 127.0.0.1:8881 → Dropbear:109 (path /cdn → Nginx CDN TLS:443 & NTLS:81/8880, juga via Squid CONNECT:80)"
+        ok "ws-epro aktif di 127.0.0.1:8881 → Dropbear:109 (Nginx /cdn TLS:443, NTLS:80/8880, SSLH-mux:8000)"
     else
         err "ws.service gagal start. Cek: journalctl -u ws.service -n 30"
         return 1
     fi
 }
 # ════════════════════════════════════════════════════════════
-#  INSTALLER — Squid Proxy (port 80, 8000, 3128)
+#  INSTALLER — SSLH multiplexer (port 8000)
 # ────────────────────────────────────────────────────────────
-#  Squid bertindak sebagai HTTP/HTTPS proxy + CONNECT method
-#  untuk SSH-over-Proxy. Mendukung 3 port:
-#     • 80    → publik (rekomendasi untuk klien SSH WS)
-#     • 8000  → alternatif (banyak ISP/captive portal allow)
-#     • 3128  → standar squid (debug/test)
+#  SSLH menerima koneksi di :8000 dan mendeteksi protokol via
+#  paket pertama, lalu forward ke handler yang tepat:
+#     • SSH plain      → 127.0.0.1:22  (SSH DIRECT)
+#     • TLS / SSL      → 127.0.0.1:7777 (Stunnel → Dropbear:109)
+#     • HTTP plain     → 127.0.0.1:80  (Nginx HTTP — termasuk SSH-WS /cdn)
+#     • TLS WS         → 127.0.0.1:443 (Nginx TLS  — termasuk SSH-WS /cdn)
 #
-#  CONNECT method di-allow ke localhost ports:
-#     • 22  (OpenSSH)
-#     • 109 (Dropbear)
-#     • 143 (Dropbear alt)
-#     • 8881 (ws-epro → Dropbear:109) → bisa pakai SSH WS via Squid
+#  Hasil: 1 port (8000) melayani SSH DIRECT, STUNNEL5,
+#  SSH WS HTTP, SSH WS SSL/TLS — sesuai kebutuhan multi-protokol.
 # ════════════════════════════════════════════════════════════
-install_squid() {
-    inf "Install Squid Proxy (port 80, 8000, 3128)..."
-    if ! command -v squid &>/dev/null; then
-        apt-get install -y -qq squid 2>/dev/null || apt-get install -y -qq squid3 2>/dev/null
+install_sslh() {
+    inf "Install SSLH multiplexer (port 8000 → SSH/SSL/HTTP/WS)..."
+    if ! command -v sslh &>/dev/null; then
+        # SSLH ditanya "standalone or inetd" — pilih standalone (default).
+        echo 'sslh sslh/inetd_or_standalone select standalone' | debconf-set-selections
+        apt-get install -y -qq sslh 2>/dev/null
     fi
-    if ! command -v squid &>/dev/null && ! command -v squid3 &>/dev/null; then
-        err "Squid gagal terinstall — fitur dilewati"
+    if ! command -v sslh &>/dev/null; then
+        warn "SSLH gagal terinstall — port 8000 mux dilewati"
         return 1
     fi
 
-    local dom; dom=$(get_domain)
-    mkdir -p /etc/squid /var/log/squid /var/spool/squid
-    chown -R proxy:proxy /var/log/squid /var/spool/squid 2>/dev/null || true
+    # Config SSLH (pakai sslh-select untuk efisiensi)
+    cat > /etc/default/sslh <<'SSLHCONF'
+# MAX PANEL — SSLH multiplexer
+RUN=yes
+DAEMON=/usr/sbin/sslh
+DAEMON_OPTS="--user sslh \
+    --listen 0.0.0.0:8000 \
+    --ssh 127.0.0.1:22 \
+    --tls 127.0.0.1:7777 \
+    --http 127.0.0.1:80 \
+    --ssl 127.0.0.1:443 \
+    --pidfile /var/run/sslh/sslh.pid"
+SSLHCONF
 
-    # Backup config asli (sekali saja)
-    if [[ -f /etc/squid/squid.conf && ! -f /etc/squid/squid.conf.dpkg-orig ]]; then
-        cp /etc/squid/squid.conf /etc/squid/squid.conf.dpkg-orig
-    fi
+    mkdir -p /var/run/sslh
+    chown sslh:sslh /var/run/sslh 2>/dev/null || true
 
-    # Generate config — minimal, fokus untuk SSH-over-Proxy + WS CONNECT
-    cat > /etc/squid/squid.conf <<SQUIDCONF
-# MAX PANEL — Squid Proxy Config
-# Listen ports: 80 (publik), 8000 (alternatif), 3128 (standar)
-http_port 80
-http_port 8000
-http_port 3128
-
-# Visible hostname (banner CONNECT)
-visible_hostname ${dom}
-
-# === ACL ============================================================
-acl localnet src 0.0.0.0/0
-acl localnet src ::/0
-acl SSL_ports port 443 22 109 143 8881
-acl Safe_ports port 22          # ssh
-acl Safe_ports port 80          # http
-acl Safe_ports port 109         # dropbear
-acl Safe_ports port 143         # dropbear alt
-acl Safe_ports port 443         # https
-acl Safe_ports port 8000        # alt
-acl Safe_ports port 3128        # squid
-acl Safe_ports port 8881        # ws-epro
-acl Safe_ports port 1025-65535  # unregistered
-acl CONNECT method CONNECT
-
-# === Access rules ===================================================
-http_access deny !Safe_ports
-# IZINKAN CONNECT ke port apa saja di SSL_ports (untuk SSH/WS via proxy)
-http_access allow CONNECT SSL_ports
-http_access allow localhost manager
-http_access deny manager
-http_access allow localhost
-http_access allow localnet
-http_access allow all
-
-# === Cache & Logging ================================================
-cache_dir ufs /var/spool/squid 100 16 256
-coredump_dir /var/spool/squid
-access_log /var/log/squid/access.log squid
-cache_log /var/log/squid/cache.log
-
-# === Refresh patterns (default minimal) =============================
-refresh_pattern ^ftp:           1440    20%     10080
-refresh_pattern ^gopher:        1440    0%      1440
-refresh_pattern -i (/cgi-bin/|\?) 0     0%      0
-refresh_pattern .               0       20%     4320
-
-# === Tweak — anonymize client supaya respon CONNECT lebih bersih ====
-forwarded_for off
-via off
-request_header_access X-Forwarded-For deny all
-request_header_access Via deny all
-
-# Banner respon "200 OK" untuk CONNECT (custom payload-friendly)
-# Squid built-in akan jawab "HTTP/1.1 200 Connection established"
-# yang kompatibel dengan HTTP Injector / NPV Tunnel default.
-
-# Disable cache untuk hemat IO (proxy-only)
-cache deny all
-SQUIDCONF
-    chmod 644 /etc/squid/squid.conf
-
-    # Init cache dir kalau belum
-    if [[ ! -d /var/spool/squid/00 ]]; then
-        squid -z &>/dev/null || true
-        sleep 1
-    fi
-
-    systemctl enable squid &>/dev/null
-    # Stop dulu kalau ada nginx/apache pegang port 80
-    fuser -k 80/tcp 2>/dev/null
+    ufw allow 8000/tcp &>/dev/null || true
+    systemctl enable sslh &>/dev/null
+    systemctl restart sslh 2>/dev/null
     sleep 1
-    systemctl restart squid 2>/dev/null
-
-    sleep 2
-    if systemctl is-active --quiet squid; then
-        ok "Squid Proxy aktif di port 80, 8000, 3128 (CONNECT support: 22, 109, 143, 8881)"
+    if is_up sslh; then
+        ok "SSLH aktif di :8000 (SSH DIRECT / STUNNEL / WS HTTP / WS SSL)"
     else
-        err "Squid gagal start. Cek: journalctl -u squid -n 30"
-        return 1
+        warn "SSLH belum aktif — cek: journalctl -u sslh -n 30"
     fi
 }
 
@@ -1956,7 +1933,7 @@ SQUIDCONF
 #  INSTALLER — Nginx reverse-proxy (path-routing untuk Xray)
 # ════════════════════════════════════════════════════════════
 install_nginx() {
-    inf "Install Nginx + reverse-proxy path-routing (81/443 + 8443 alt-TLS, port 80 dipegang Squid)..."
+    inf "Install Nginx + reverse-proxy path-routing (80 HTTP + 443 TLS + 89 alt + 8880 NTLS)..."
     if ! command -v nginx &>/dev/null; then
         apt-get install -y -qq nginx 2>/dev/null
     fi
@@ -1967,66 +1944,46 @@ install_nginx() {
     # Remove default site (akan dipegang config kita)
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null
 
-    # FIX: Nginx sekarang listen di 81 (HTTP) + 443 (TLS) + 8443 (alt-TLS) + 8880 (NTLS public).
-    # Port 80 dipegang Squid Proxy → kompatibel SSHWS via CONNECT method.
-    # Semua path Xray + SSH-WS dirutekan dari sini. SSH/Dropbear/Stunnel TIDAK pakai 81/443.
+    # Nginx listen di 80 (HTTP), 443 (TLS), 89 (alt), 8880 (NTLS public).
+    # SSLH multiplexer di :8000 akan forward HTTP→127.0.0.1:80 dan TLS→127.0.0.1:443.
     #
     # Xray inbound mapping (semua 127.0.0.1):
-    #   /vmess       → 10001  (VMess WS)
-    #   /vless       → 10002  (VLess WS)
-    #   /trojan-ws   → 10003  (Trojan WS)
-    #   /vless-grpc  → 10004  (VLess gRPC)  — hanya di server TLS
-    #   /trojan-grpc → 10005  (Trojan gRPC) — hanya di server TLS
-    #   /cdn         → 8881   (SSH-over-WS via ws-epro → Dropbear:109)
+    #   /vmess        → 10001  (VMess WS)
+    #   /vless        → 10002  (VLess WS)
+    #   /trojan-ws    → 10003  (Trojan WS)
+    #   /vless-grpc   → 10004  (VLess gRPC)
+    #   /trojan-grpc  → 10005  (Trojan gRPC)
+    #   /ss-ws        → 10006  (Shadowsocks WS)   — opsional
+    #   /ss-grpc      → 10007  (Shadowsocks gRPC) — opsional
+    #   /cdn          → 8881   (SSH-over-WS via ws-epro → Dropbear:109)
     cat > /etc/nginx/conf.d/xray.conf <<NGX
-# MAX PANEL — Xray reverse-proxy (HTTP 81 + TLS 443 + alt-TLS 8443 + NTLS 8880)
+# MAX PANEL — Xray reverse-proxy (HTTP 80 + alt 89 + TLS 443 + NTLS 8880)
 # === SHARED PROXY HEADERS ===========================================
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
 
-# === HTTP 81 (plain — Squid pegang port 80) ==========================
+# === Reusable upstream blocks (path → Xray inbound) =================
+# (gRPC butuh grpc_pass, WS butuh proxy_pass http://)
+
+# === HTTP 80 (Xray HTTP + SSH-WS HTTP) ===============================
 server {
-    listen 81 default_server;
-    listen [::]:81 default_server;
+    listen 80 default_server;
+    listen [::]:80 default_server;
     server_name ${dom} _;
     root /var/www/html;
     index index.html;
 
-    location = /vmess {
-        if (\$http_upgrade != "websocket") { return 404; }
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:10001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_read_timeout 300s;
-    }
+    # gRPC HTTP (h2c)
+    location ^~ /vless-grpc  { grpc_pass grpc://127.0.0.1:10004; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /trojan-grpc { grpc_pass grpc://127.0.0.1:10005; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /ss-grpc     { grpc_pass grpc://127.0.0.1:10007; grpc_set_header Host \$host; client_max_body_size 0; }
 
-    location = /vless {
-        if (\$http_upgrade != "websocket") { return 404; }
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:10002;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_read_timeout 300s;
-    }
+    location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
+    location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
+    location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
+    location = /ss-ws     { proxy_pass http://127.0.0.1:10006; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
 
-    location = /trojan-ws {
-        if (\$http_upgrade != "websocket") { return 404; }
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:10003;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_read_timeout 300s;
-    }
-
-    # SSH-over-WebSocket CDN NTLS (Nginx → ws-epro → Dropbear:109)
+    # SSH-over-WebSocket (Nginx → ws-epro → Dropbear:109)
     location = /cdn {
-        proxy_redirect off;
         proxy_pass http://127.0.0.1:8881;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -2039,7 +1996,24 @@ server {
     location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
 }
 
-# === TLS 443 (primary) ===============================================
+# === Alt-HTTP 89 (mirror :80) =======================================
+server {
+    listen 89;
+    listen [::]:89;
+    server_name ${dom} _;
+
+    location ^~ /vless-grpc  { grpc_pass grpc://127.0.0.1:10004; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /trojan-grpc { grpc_pass grpc://127.0.0.1:10005; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /ss-grpc     { grpc_pass grpc://127.0.0.1:10007; grpc_set_header Host \$host; client_max_body_size 0; }
+    location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /ss-ws     { proxy_pass http://127.0.0.1:10006; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /cdn       { proxy_pass http://127.0.0.1:8881;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_buffering off; }
+    location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
+}
+
+# === TLS 443 (primary — semua Xray TLS + SSH-WS TLS) =================
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
@@ -2050,82 +2024,18 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_session_cache shared:SSL:10m;
 
-    # gRPC VLess
-    location ^~ /vless-grpc {
-        grpc_pass grpc://127.0.0.1:10004;
-        grpc_set_header Host \$host;
-        client_max_body_size 0;
-    }
+    # gRPC TLS
+    location ^~ /vless-grpc  { grpc_pass grpc://127.0.0.1:10004; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /trojan-grpc { grpc_pass grpc://127.0.0.1:10005; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /ss-grpc     { grpc_pass grpc://127.0.0.1:10007; grpc_set_header Host \$host; client_max_body_size 0; }
 
-    # gRPC Trojan
-    location ^~ /trojan-grpc {
-        grpc_pass grpc://127.0.0.1:10005;
-        grpc_set_header Host \$host;
-        client_max_body_size 0;
-    }
+    # WS over TLS
+    location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
+    location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
+    location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
+    location = /ss-ws     { proxy_pass http://127.0.0.1:10006; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 300s; }
+    location = /cdn       { proxy_pass http://127.0.0.1:8881;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_read_timeout 7200s; proxy_buffering off; }
 
-    # WS over TLS (Nginx terminates TLS, forward plaintext WS ke Xray internal)
-    location = /vmess {
-        proxy_pass http://127.0.0.1:10001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_read_timeout 300s;
-    }
-    location = /vless {
-        proxy_pass http://127.0.0.1:10002;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_read_timeout 300s;
-    }
-    location = /trojan-ws {
-        proxy_pass http://127.0.0.1:10003;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_read_timeout 300s;
-    }
-    location = /cdn {
-        proxy_pass http://127.0.0.1:8881;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_read_timeout 7200s;
-        proxy_buffering off;
-    }
-
-    location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
-}
-
-# === Alt-TLS 8443 (backup listener, sama dengan 443) =================
-server {
-    listen 8443 ssl http2;
-    listen [::]:8443 ssl http2;
-    server_name ${dom} _;
-
-    ssl_certificate     /etc/xray/xray.crt;
-    ssl_certificate_key /etc/xray/xray.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    location ^~ /vless-grpc {
-        grpc_pass grpc://127.0.0.1:10004;
-        grpc_set_header Host \$host;
-        client_max_body_size 0;
-    }
-    location ^~ /trojan-grpc {
-        grpc_pass grpc://127.0.0.1:10005;
-        grpc_set_header Host \$host;
-        client_max_body_size 0;
-    }
-    location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
-    location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
-    location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
-    location = /cdn        { proxy_pass http://127.0.0.1:8881;  proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; proxy_buffering off; }
     location / { return 200 'MAX PANEL OK'; add_header Content-Type text/plain; }
 }
 
@@ -2135,6 +2045,13 @@ server {
     listen [::]:8880;
     server_name ${dom} _;
 
+    location ^~ /vless-grpc  { grpc_pass grpc://127.0.0.1:10004; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /trojan-grpc { grpc_pass grpc://127.0.0.1:10005; grpc_set_header Host \$host; client_max_body_size 0; }
+    location ^~ /ss-grpc     { grpc_pass grpc://127.0.0.1:10007; grpc_set_header Host \$host; client_max_body_size 0; }
+    location = /vmess     { proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /vless     { proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /trojan-ws { proxy_pass http://127.0.0.1:10003; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
+    location = /ss-ws     { proxy_pass http://127.0.0.1:10006; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \$connection_upgrade; proxy_set_header Host \$host; }
     location = /cdn {
         proxy_pass http://127.0.0.1:8881;
         proxy_http_version 1.1;
@@ -2152,7 +2069,7 @@ NGX
     if nginx -t &>/dev/null; then
         systemctl enable nginx &>/dev/null
         systemctl restart nginx 2>/dev/null
-        is_up nginx && ok "Nginx aktif (81 HTTP + 443/8443 TLS + 8880 NTLS)" || warn "Nginx belum aktif"
+        is_up nginx && ok "Nginx aktif (80, 89 HTTP + 443 TLS + 8880 NTLS)" || warn "Nginx belum aktif"
     else
         err "Konfigurasi Nginx INVALID — cek: nginx -t"
         nginx -t 2>&1 | tail -10 | while read -r ln; do warn "  $ln"; done
@@ -2253,10 +2170,10 @@ do_install_all() {
     _step  9 "BadVPN UDPGW (7100/7200/7300)";        install_udpgw
     _step 10 "OpenVPN (TCP 1194 + UDP 2200)";        install_openvpn
     _step 11 "WireGuard (UDP 51820)";                install_wireguard
-    _step 12 "SlowDNS (port 53 + 5300)";             install_slowdns
+    _step 12 "SlowDNS (53, 5300, 2269, 3369)";       install_slowdns
     _step 13 "WebSocket (ws-epro)";                  install_ws_proxy
-    _step 14 "Squid Proxy (80/8000/3128)";           install_squid
-    _step 15 "Nginx reverse-proxy (path-routing)";   install_nginx
+    _step 14 "Nginx reverse-proxy (80/443/89/8880)"; install_nginx
+    _step 15 "SSLH multiplexer (port 8000)";         install_sslh
     _step 16 "Cron: expired cleanup + maxlogin + backup"; install_cron_jobs
 
     trap - ERR
@@ -2283,23 +2200,23 @@ do_install_all() {
     echo -e "  ${A1}${_DASH}${NC}"
     echo -e "  ${BLD}${A4}  Daftar Protokol & Port${NC}"
     echo -e "  ${A1}${_DASH}${NC}"
-    printf  "  ${A3}•${NC} OpenSSH         : ${Y}22${NC}\n"
-    printf  "  ${A3}•${NC} Dropbear        : ${Y}109, 143${NC}\n"
-    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}445, 777${NC}\n"
-    printf  "  ${A3}•${NC} Squid Proxy     : ${Y}80, 8000, 3128${NC} (CONNECT → SSH/Dropbear)\n"
-    printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}81${NC}  — paths: /vmess /vless /trojan-ws /cdn\n"
-    printf  "  ${A3}•${NC} Nginx (TLS)     : ${Y}443${NC}, ${Y}8443${NC} alt — + /vless-grpc /trojan-grpc\n"
+    printf  "  ${A3}•${NC} OpenSSH         : ${Y}22, 99, 169, 2269, 3369${NC}\n"
+    printf  "  ${A3}•${NC} Dropbear        : ${Y}109, 143, 300, 1153${NC}\n"
+    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}127.0.0.1:7777${NC} (mux via SSLH:8000)\n"
+    printf  "  ${A3}•${NC} SSLH multiplexer: ${Y}8000${NC} (auto-detect SSH / SSL / HTTP / WS)\n"
+    printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}80, 89${NC}  — paths: /vmess /vless /trojan-ws /cdn\n"
+    printf  "  ${A3}•${NC} Nginx (TLS)     : ${Y}443${NC} — + /vless-grpc /trojan-grpc /ss-ws /ss-grpc\n"
     printf  "  ${A3}•${NC} Nginx (NTLS)    : ${Y}8880${NC}  — path: /cdn (SSH WS public)\n"
     printf  "  ${A3}•${NC} SSH WebSocket   : ${Y}/cdn${NC} (→ internal 127.0.0.1:8881 → Dropbear:109)\n"
     printf  "  ${A3}•${NC} OpenVPN         : ${Y}TCP 1194, UDP 2200${NC}\n"
-    printf  "  ${A3}•${NC} Xray VMess WS   : ${Y}/vmess (81, 443)${NC}\n"
-    printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (81, 443)${NC} + gRPC ${Y}443${NC}\n"
-    printf  "  ${A3}•${NC} Xray Trojan     : ${Y}/trojan-ws (443)${NC} + gRPC ${Y}443${NC}\n"
-    printf  "  ${A3}•${NC} Shadowsocks-22  : ${Y}8388${NC}\n"
+    printf  "  ${A3}•${NC} Xray VMess WS   : ${Y}/vmess (80, 443)${NC}\n"
+    printf  "  ${A3}•${NC} Xray VLess WS   : ${Y}/vless (80, 443)${NC} + gRPC ${Y}80, 443${NC}\n"
+    printf  "  ${A3}•${NC} Xray Trojan     : ${Y}/trojan-ws (80, 443)${NC} + gRPC ${Y}80, 443${NC}\n"
+    printf  "  ${A3}•${NC} Shadowsocks     : ${Y}8388${NC} direct + ${Y}/ss-ws /ss-grpc (80, 443)${NC}\n"
     printf  "  ${A3}•${NC} Trojan-Go       : ${Y}2087${NC}\n"
     printf  "  ${A3}•${NC} BadVPN UDPGW    : ${Y}7100, 7200, 7300${NC}\n"
     printf  "  ${A3}•${NC} Hysteria 2      : ${Y}UDP 36712 (+ 5300, 7300)${NC}\n"
-    printf  "  ${A3}•${NC} SlowDNS         : ${Y}53 → 5300${NC}\n"
+    printf  "  ${A3}•${NC} SlowDNS         : ${Y}5300, 2269, 3369${NC} (+ port 53 redirect)\n"
     printf  "  ${A3}•${NC} WireGuard       : ${Y}UDP 51820${NC}\n"
     printf  "  ${A3}•${NC} OHP (opsional)  : ${Y}8080${NC}\n"
     echo -e "  ${A1}${_DASH}${NC}"
@@ -2678,18 +2595,13 @@ for tag in ("vmess-ws",):
 # Trojan (WS + gRPC)
 for tag in ("trojan-ws","trojan-grpc"):
     set_inbound(tag, trojan_clients())
-# SS
+# SS — semua 3 inbound (direct, ws, grpc) share daftar user yang sama
 ss = ss_clients()
 for ib in inbounds:
-    if ib.get('tag') == 'ss-2022':
+    if ib.get('tag') in ('ss-direct','ss-ws','ss-grpc'):
         ib.setdefault('settings', {})
-        if ss:
-            ib['settings']['clients'] = ss
-            # ss-2022 single password fallback
-            ib['settings'].setdefault('method','aes-128-gcm')
-        else:
-            ib['settings']['clients'] = []
-            ib['settings'].setdefault('method','aes-128-gcm')
+        ib['settings']['clients'] = ss
+        ib['settings'].setdefault('method','aes-128-gcm')
 with open(CFG,'w') as f: json.dump(cfg, f, indent=2)
 PYSYNC
     _xray_reload
@@ -2826,10 +2738,10 @@ vless_add() {
     echo -e "  ${LG}vless://${uuid}@${dom}:80?path=/vless&encryption=none&host=${dom}&type=ws#${u}-HTTP${NC}"
     echo ""
     echo -e "  ${DIM}🔗 Link VLess gRPC TLS:${NC}"
-    echo -e "  ${LG}vless://${uuid}@${dom}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC${NC}"
+    echo -e "  ${LG}vless://${uuid}@${dom}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-TLS${NC}"
     echo ""
-    echo -e "  ${DIM}🔗 Link VLess gRPC alt-TLS (port 8443):${NC}"
-    echo -e "  ${DIM}vless://${uuid}@${dom}:8443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
+    echo -e "  ${DIM}🔗 Link VLess gRPC HTTP:${NC}"
+    echo -e "  ${LG}vless://${uuid}@${dom}:80?mode=gun&encryption=none&type=grpc&serviceName=vless-grpc#${u}-gRPC-HTTP${NC}"
     echo ""
     _tg_send "$(_tg_render_vless "$u" "$uuid" "$exp" "$ml")"
     pause
@@ -2908,13 +2820,16 @@ trojan_add() {
     show_box_xray "Trojan" "$u" "$p" "$exp" "$ml"
     local dom; dom=$(get_domain)
     echo -e "  ${DIM}🔗 Link Trojan WS TLS  :${NC}"
-    echo -e "  ${LG}trojan://${p}@${dom}:443?path=/trojan-ws&security=tls&host=${dom}&type=ws&sni=${dom}#${u}-WS${NC}"
+    echo -e "  ${LG}trojan://${p}@${dom}:443?path=/trojan-ws&security=tls&host=${dom}&type=ws&sni=${dom}#${u}-WS-TLS${NC}"
+    echo ""
+    echo -e "  ${DIM}🔗 Link Trojan WS HTTP :${NC}"
+    echo -e "  ${LG}trojan://${p}@${dom}:80?path=/trojan-ws&host=${dom}&type=ws#${u}-WS-HTTP${NC}"
     echo ""
     echo -e "  ${DIM}🔗 Link Trojan gRPC TLS:${NC}"
-    echo -e "  ${LG}trojan://${p}@${dom}:443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC${NC}"
+    echo -e "  ${LG}trojan://${p}@${dom}:443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-TLS${NC}"
     echo ""
-    echo -e "  ${DIM}🔗 Link Trojan gRPC alt-TLS (port 8443):${NC}"
-    echo -e "  ${DIM}trojan://${p}@${dom}:8443?mode=gun&security=tls&type=grpc&serviceName=trojan-grpc&sni=${dom}#${u}-gRPC-ALT${NC}"
+    echo -e "  ${DIM}🔗 Link Trojan gRPC HTTP:${NC}"
+    echo -e "  ${LG}trojan://${p}@${dom}:80?mode=gun&type=grpc&serviceName=trojan-grpc#${u}-gRPC-HTTP${NC}"
     echo ""
     _tg_send "$(_tg_render_trojan "$u" "$p" "$exp" "$ml")"
     pause
@@ -5305,13 +5220,15 @@ menu_about() {
   Lisensi  : ${A3}Open / Free${NC}
 
   ${DIM}Protokol terinstall:${NC}
-   • OpenSSH (22)                   • Dropbear (109, 143)
-   • Stunnel SSL (445, 777)        • Nginx (81 / 443 / 8443 / 8880)
-   • Squid Proxy (80, 8000, 3128)  • SSH WebSocket via Nginx + Squid
-   • OpenVPN (TCP 1194 / UDP 2200) • Xray VMess/VLess/Trojan/SS
-   • Trojan-Go (2087)              • Hysteria 2 (UDP 36712 + range)
-   • BadVPN UDPGW (7100/7200/7300) • WireGuard (UDP 51820)
-   • SlowDNS (53 → 5300)           • OHP (8080) opsional
+   • OpenSSH (22, 99, 169, 2269, 3369)
+   • Dropbear (109, 143, 300, 1153)
+   • Stunnel SSL (internal :7777, mux di SSLH:8000)
+   • SSLH multiplexer (8000)        • Nginx (80 / 89 / 443 / 8880)
+   • SSH WebSocket via Nginx (/cdn)
+   • OpenVPN (TCP 1194 / UDP 2200)  • Xray VMess/VLess/Trojan/SS WS+gRPC
+   • Trojan-Go (2087)               • Hysteria 2 (UDP 36712 + range)
+   • BadVPN UDPGW (7100/7200/7300)  • WireGuard (UDP 51820)
+   • SlowDNS (5300, 2269, 3369)     • OHP (8080) opsional
 
   ${DIM}Path config:${NC}
    • /etc/maxpanel/        : panel data + user DB
