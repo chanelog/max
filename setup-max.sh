@@ -1206,6 +1206,24 @@ BANNER_EOF
     chmod 644 "$target" 2>/dev/null
     # Sinkronkan ke /etc/issue (login lokal/console) juga supaya konsisten
     cp -f "$target" /etc/issue 2>/dev/null
+    # Sinkronkan ke /etc/motd juga — supaya banner tampil SETELAH login berhasil
+    # (penting untuk SSHWS TLS/NTLS via Nginx → Dropbear, karena sebagian client
+    # WebSocket tidak menampilkan pre-auth banner /etc/issue.net).
+    cp -f "$target" /etc/motd 2>/dev/null
+
+    # Pastikan PAM motd aktif di sshd (Debian/Ubuntu) supaya /etc/motd tampil
+    if [[ -f /etc/pam.d/sshd ]]; then
+        # Aktifkan motd module bila ter-comment / belum ada
+        if grep -q '^#\s*session\s\+optional\s\+pam_motd\.so' /etc/pam.d/sshd; then
+            sed -i 's|^#\s*\(session\s\+optional\s\+pam_motd\.so.*\)|\1|' /etc/pam.d/sshd
+        elif ! grep -q '^session\s\+optional\s\+pam_motd\.so' /etc/pam.d/sshd; then
+            echo 'session    optional     pam_motd.so motd=/etc/motd' >> /etc/pam.d/sshd
+        fi
+    fi
+    # Matikan dynamic motd biar tidak override /etc/motd kita
+    if [[ -d /etc/update-motd.d ]]; then
+        chmod -x /etc/update-motd.d/* 2>/dev/null || true
+    fi
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1232,9 +1250,13 @@ install_ssh() {
     if [[ ! -s /etc/issue.net ]]; then
         write_default_banner
     fi
-    # Pastikan directive Banner aktif (idempotent)
+    # Pastikan directive Banner aktif (idempotent) — pre-auth banner
     sed -i '/^#\?Banner[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
     echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
+    # PrintMotd yes — post-auth banner (penting untuk SSHWS TLS/NTLS via Nginx)
+    sed -i '/^#\?PrintMotd[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
+    echo "PrintMotd yes" >> /etc/ssh/sshd_config
+    # PrintLastLog optional — biarkan default (yes), tidak diubah
 
     # Buka firewall (kalau ufw aktif)
     for p in 22 99 169 2269 3369; do
