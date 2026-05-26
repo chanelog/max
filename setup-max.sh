@@ -90,6 +90,71 @@ check_os() {
     export OS_NAME OS_ID OS_LIKE
 }
 
+# ── CEK KONFLIK SERVICE / PORT ───────────────────────────────────────
+# Beberapa image VPS (Alibaba Cloud, dll) sudah ter-install Apache2 atau
+# webserver lain yang menempati port 80/443/8880 → bikin Nginx gagal bind.
+# Fungsi ini deteksi & cleanup otomatis SEBELUM installer mulai.
+check_conflicts() {
+    local conflicts=()
+    local removed=()
+
+    # 1. Cek webserver konflik (Apache2, Lighttpd, Caddy, dll)
+    local conflicting_pkgs=("apache2" "lighttpd" "caddy")
+    local pkg
+    for pkg in "${conflicting_pkgs[@]}"; do
+        if dpkg -l 2>/dev/null | grep -q "^ii  ${pkg} "; then
+            conflicts+=("$pkg")
+        fi
+    done
+
+    # 2. Kalau ada konflik, kasih info & auto-cleanup
+    if [[ ${#conflicts[@]} -gt 0 ]]; then
+        echo ""
+        echo -e "\033[1;33m  ─────────────────────────────────────────────────────────\033[0m"
+        echo -e "  ⚠  TERDETEKSI WEBSERVER KONFLIK"
+        echo -e "  Service ini menempati port 80/443 dan akan menggangu Nginx:"
+        for pkg in "${conflicts[@]}"; do
+            echo -e "    • \033[1;31m${pkg}\033[0m"
+        done
+        echo ""
+        echo -e "  \033[1;36mAuto-cleanup akan dijalankan dalam 5 detik...\033[0m"
+        echo -e "  (Tekan Ctrl+C untuk batal kalau Anda butuh service ini)"
+        echo -e "\033[1;33m  ─────────────────────────────────────────────────────────\033[0m"
+        sleep 5
+
+        export DEBIAN_FRONTEND=noninteractive
+        for pkg in "${conflicts[@]}"; do
+            echo -e "  \033[1;36m→\033[0m Stop & purge ${pkg}..."
+            systemctl stop "$pkg" 2>/dev/null
+            systemctl disable "$pkg" 2>/dev/null
+            apt-get purge -y -qq "$pkg" "${pkg}-utils" "${pkg}-bin" "${pkg}-data" "${pkg}-doc" 2>/dev/null
+            removed+=("$pkg")
+        done
+        # Bersihkan folder config sisa
+        rm -rf /etc/apache2 /var/www/html 2>/dev/null
+        apt-get autoremove -y -qq 2>/dev/null
+
+        if [[ ${#removed[@]} -gt 0 ]]; then
+            echo -e "  \033[1;32m✔\033[0m  Removed: ${removed[*]}"
+        fi
+    fi
+
+    # 3. Cek port 80 masih dipakai service lain (selain yg sudah dihapus)
+    local port80_user
+    port80_user=$(ss -tlnp 2>/dev/null | awk '$4 ~ /:80$/ {print $0; exit}')
+    if [[ -n "$port80_user" ]]; then
+        # Lewati kalau itu nginx (sudah ada install sebelumnya, OK)
+        if ! echo "$port80_user" | grep -q '"nginx"'; then
+            echo ""
+            echo -e "\033[1;33m  ⚠  Port 80 masih dipakai oleh service lain:\033[0m"
+            echo -e "  \033[2m${port80_user}\033[0m"
+            echo -e "  \033[1;33m  Installer akan tetap lanjut, tapi Nginx mungkin gagal bind port 80.\033[0m"
+            echo ""
+            sleep 3
+        fi
+    fi
+}
+
 # ════════════════════════════════════════════════════════════
 #  KONSTANTA & PATH — Hindari bentrok dengan ogh-ziv
 # ════════════════════════════════════════════════════════════
@@ -1089,9 +1154,24 @@ install_deps() {
         figlet toilet boxes lolcat speedtest-cli wireguard wireguard-tools resolvconf \
         qrencode bc iptables iptables-persistent netfilter-persistent ca-certificates \
         gnupg2 lsof psmisc openssl python3-websockify sslh 2>/dev/null || true
-    # retry sekali lagi tanpa fail-on-missing untuk paket opsional
-    apt-get install -y -qq nginx jq 2>/dev/null || true
-    ok "Dependensi terpasang"
+    # Install Nginx — wajib sukses, kalau gagal abort
+    if ! command -v nginx &>/dev/null; then
+        if ! apt-get install -y -qq nginx jq 2>&1 | tail -5; then
+            warn "Install Nginx gagal, mencoba ulang..."
+            apt-get update -qq 2>/dev/null
+            apt-get install -y nginx jq || {
+                err "GAGAL install Nginx — installer tidak bisa lanjut!"
+                err "Coba cek manual: apt-get install -y nginx"
+                exit 1
+            }
+        fi
+    fi
+    # Verifikasi nginx benar-benar terpasang
+    if ! command -v nginx &>/dev/null; then
+        err "Nginx binary tidak ditemukan setelah install — abort!"
+        exit 1
+    fi
+    ok "Dependensi terpasang (Nginx: $(nginx -v 2>&1 | awk -F/ '{print $2}'))"
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1935,8 +2015,24 @@ SSLHCONF
 install_nginx() {
     inf "Install Nginx + reverse-proxy path-routing (80 HTTP + 443 TLS + 89 alt + 8880 NTLS)..."
     if ! command -v nginx &>/dev/null; then
-        apt-get install -y -qq nginx 2>/dev/null
+        apt-get install -y -qq nginx 2>/dev/null || {
+            err "Gagal install Nginx — abort install_nginx!"
+            return 1
+        }
     fi
+
+    # Pastikan tidak ada webserver lain yang masih nempel di port 80/443
+    # (defensif — biasanya sudah dihandle check_conflicts di awal)
+    local p80_owner
+    p80_owner=$(ss -tlnp 2>/dev/null | awk '$4 ~ /:80$/ {print $0; exit}')
+    if [[ -n "$p80_owner" ]] && ! echo "$p80_owner" | grep -q '"nginx"'; then
+        warn "Port 80 dipakai service non-nginx, coba bebaskan..."
+        for svc in apache2 lighttpd caddy httpd; do
+            systemctl stop "$svc" 2>/dev/null
+            systemctl disable "$svc" 2>/dev/null
+        done
+    fi
+
     mkdir -p /etc/nginx/conf.d
 
     local dom; dom=$(get_domain)
@@ -2069,7 +2165,27 @@ NGX
     if nginx -t &>/dev/null; then
         systemctl enable nginx &>/dev/null
         systemctl restart nginx 2>/dev/null
-        is_up nginx && ok "Nginx aktif (80, 89 HTTP + 443 TLS + 8880 NTLS)" || warn "Nginx belum aktif"
+        if is_up nginx; then
+            ok "Nginx aktif (80, 89 HTTP + 443 TLS + 8880 NTLS)"
+            # Smoke test: pastikan path /cdn merespons 101 Switching Protocols
+            sleep 1
+            local ws_status
+            ws_status=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "Connection: Upgrade" \
+                -H "Upgrade: websocket" \
+                -H "Sec-WebSocket-Key: dGVzdA==" \
+                -H "Sec-WebSocket-Version: 13" \
+                --max-time 5 \
+                http://127.0.0.1/cdn 2>/dev/null || echo "000")
+            if [[ "$ws_status" == "101" ]]; then
+                ok "WebSocket /cdn OK (HTTP 101 Switching Protocols)"
+            else
+                warn "WebSocket /cdn smoke-test gagal (status: $ws_status)"
+                warn "  → Cek manual: curl -i http://127.0.0.1/cdn -H 'Upgrade: websocket' -H 'Connection: Upgrade'"
+            fi
+        else
+            warn "Nginx belum aktif — cek: journalctl -u nginx -n 30"
+        fi
     else
         err "Konfigurasi Nginx INVALID — cek: nginx -t"
         nginx -t 2>&1 | tail -10 | while read -r ln; do warn "  $ln"; done
@@ -5525,6 +5641,7 @@ handle_cli_flags "$@"
 # Cek prasyarat
 check_root
 check_os
+check_conflicts
 
 # Setup direktori dasar
 mkdir -p "$DIR" "$LOGDIR" "$BACKUPDIR"
