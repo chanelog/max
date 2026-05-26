@@ -1211,7 +1211,29 @@ BANNER_EOF
     # WebSocket tidak menampilkan pre-auth banner /etc/issue.net).
     cp -f "$target" /etc/motd 2>/dev/null
 
-    # Pastikan PAM motd aktif di sshd (Debian/Ubuntu) supaya /etc/motd tampil
+    # Install semua hook (PAM motd, profile.d, bash.bashrc) — idempotent.
+    _install_banner_hooks
+}
+
+# ════════════════════════════════════════════════════════════
+#  BANNER HOOKS — Pastikan banner muncul di semua jalur SSH
+# ────────────────────────────────────────────────────────────
+#  Dipisah dari write_default_banner supaya bisa dipanggil ulang
+#  TANPA menimpa /etc/issue.net (untuk user yang pakai banner custom).
+#
+#  Jalur SSH yang harus di-cover:
+#    1. OpenSSH direct (port 22/99/169/...)         → Banner directive + PrintMotd
+#    2. Dropbear direct (port 109/143/300/1153)     → -b /etc/issue.net (di install_ssh)
+#    3. SSHWS TLS  (Client → Nginx:443  → ws-epro → Dropbear:109)
+#    4. SSHWS NTLS (Client → Nginx:8880 → ws-epro → Dropbear:109)
+#
+#  Untuk jalur (3) & (4), banyak client WebSocket (HTTP Injector,
+#  Open Tunnel, NPV Tunnel, dll) TIDAK menampilkan pre-auth banner.
+#  Solusi: tampilkan banner via login shell hook di /etc/profile.d/
+#  dan /etc/bash.bashrc, yang ke-source setiap kali shell start.
+# ════════════════════════════════════════════════════════════
+_install_banner_hooks() {
+    # ── 1. PAM motd untuk OpenSSH (post-auth /etc/motd) ──────────────────
     if [[ -f /etc/pam.d/sshd ]]; then
         # Aktifkan motd module bila ter-comment / belum ada
         if grep -q '^#\s*session\s\+optional\s\+pam_motd\.so' /etc/pam.d/sshd; then
@@ -1223,6 +1245,71 @@ BANNER_EOF
     # Matikan dynamic motd biar tidak override /etc/motd kita
     if [[ -d /etc/update-motd.d ]]; then
         chmod -x /etc/update-motd.d/* 2>/dev/null || true
+    fi
+
+    # ── 2. PROFILE.D HOOK — login shell (paling reliable) ────────────────
+    # SSHWS TLS/NTLS jalur: Client → Nginx (443/8880) → ws-epro → Dropbear:109
+    # → user shell. Banyak client WS (HTTP Injector, Open Tunnel, dll) tidak
+    # menampilkan:
+    #   • Pre-auth banner Dropbear (-b /etc/issue.net) → di-swallow saat WS
+    #     handshake / langsung di-skip oleh client.
+    #   • /etc/motd via pam_motd → Dropbear di Debian by-default TANPA PAM,
+    #     jadi pam_motd tidak ke-trigger.
+    # Solusi: tulis hook ke /etc/profile.d/ — script ini di-source SETIAP
+    # kali login shell dijalankan (bash/sh/dash), di SEMUA jalur SSH:
+    # OpenSSH, Dropbear langsung, dan SSHWS TLS/NTLS via Dropbear.
+    cat > /etc/profile.d/00-maxpan-banner.sh <<'PROFILE_EOF'
+# MAX PANEL — Banner login shell
+# Ditulis otomatis oleh setup-max.sh / _install_banner_hooks().
+# Tampil pada SEMUA login shell: OpenSSH, Dropbear, SSHWS TLS/NTLS.
+case "$-" in
+    *i*) ;;        # interaktif → lanjut
+    *)   return ;; # non-interaktif (scp/sftp/exec) → skip
+esac
+# Hindari double-print kalau sudah tampil di session ini
+if [ -z "${MAXPAN_BANNER_SHOWN:-}" ] && [ -r /etc/issue.net ]; then
+    cat /etc/issue.net
+    export MAXPAN_BANNER_SHOWN=1
+fi
+PROFILE_EOF
+    chmod 644 /etc/profile.d/00-maxpan-banner.sh
+
+    # ── 3. BASH.BASHRC HOOK — fallback non-login bash interaktif ────────
+    # Beberapa client WebSocket (Open Tunnel, NPV Tunnel) langsung exec
+    # `bash` non-login → /etc/profile.d tidak ter-source. /etc/bash.bashrc
+    # SELALU ke-source untuk shell interaktif bash, baik login maupun non-login.
+    if [[ -f /etc/bash.bashrc ]]; then
+        # Idempotent: hapus block lama dulu, baru tulis ulang
+        sed -i '/^# >>> MAXPANEL-BANNER >>>$/,/^# <<< MAXPANEL-BANNER <<<$/d' /etc/bash.bashrc 2>/dev/null
+        cat >> /etc/bash.bashrc <<'BASHRC_EOF'
+# >>> MAXPANEL-BANNER >>>
+# Tampilkan banner /etc/issue.net pada bash interaktif (SSHWS via Dropbear).
+case "$-" in *i*)
+    if [ -z "${MAXPAN_BANNER_SHOWN:-}" ] && [ -r /etc/issue.net ]; then
+        cat /etc/issue.net
+        export MAXPAN_BANNER_SHOWN=1
+    fi
+;; esac
+# <<< MAXPANEL-BANNER <<<
+BASHRC_EOF
+    fi
+
+    # ── 4. /etc/profile fallback — kalau /etc/profile.d/ tidak di-loop ───
+    # Beberapa container/distro minimal tidak loop /etc/profile.d/* dari
+    # /etc/profile. Tambah loader manual (idempotent).
+    if [[ -f /etc/profile ]]; then
+        if ! grep -q 'MAXPANEL-PROFILE-LOADER' /etc/profile 2>/dev/null; then
+            cat >> /etc/profile <<'PROF_EOF'
+# >>> MAXPANEL-PROFILE-LOADER >>>
+if [ -d /etc/profile.d ]; then
+    for _f in /etc/profile.d/*.sh; do
+        [ -r "$_f" ] && . "$_f"
+    done
+    unset _f
+fi
+# <<< MAXPANEL-PROFILE-LOADER <<<
+PROF_EOF
+        fi
     fi
 }
 
@@ -1250,6 +1337,9 @@ install_ssh() {
     if [[ ! -s /etc/issue.net ]]; then
         write_default_banner
     fi
+    # SELALU re-install hook profile.d & bash.bashrc (idempotent) supaya banner
+    # muncul di SSHWS TLS/NTLS via Dropbear, bahkan kalau user pakai banner custom.
+    _install_banner_hooks
     # Pastikan directive Banner aktif (idempotent) — pre-auth banner
     sed -i '/^#\?Banner[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
     echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
@@ -4257,9 +4347,17 @@ tool_set_banner() {
         sed -i '/^#\?Banner[[:space:]]\+/d' /etc/ssh/sshd_config 2>/dev/null
         echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
     fi
+    # Sinkron banner ke /etc/issue (console) & /etc/motd (post-auth) supaya
+    # OpenSSH PrintMotd & SSHWS TLS/NTLS via Dropbear ikut menampilkan.
+    cp -f /etc/issue.net /etc/issue 2>/dev/null
+    cp -f /etc/issue.net /etc/motd  2>/dev/null
+    # Pastikan hook profile.d / bash.bashrc ter-install (idempotent) supaya
+    # banner muncul juga di SSHWS TLS/NTLS via Dropbear (banyak client WS
+    # tidak menampilkan pre-auth banner Dropbear -b).
+    _install_banner_hooks
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
     systemctl restart dropbear 2>/dev/null
-    ok "SSH & Dropbear di-restart — banner aktif"
+    ok "SSH & Dropbear di-restart — banner aktif (termasuk SSHWS TLS/NTLS)"
     pause
 }
 
@@ -5541,6 +5639,11 @@ do_uninstall() {
     # Hapus splash dari bashrc
     sed -i '/MAX-PANEL-SPLASH/,+1d' /root/.bashrc 2>/dev/null
     sed -i "/alias menu-max=/d;/alias max-menu=/d" /root/.bashrc 2>/dev/null
+
+    # Hapus banner hook (profile.d, bash.bashrc, /etc/profile loader)
+    rm -f /etc/profile.d/00-maxpan-banner.sh 2>/dev/null
+    sed -i '/^# >>> MAXPANEL-BANNER >>>$/,/^# <<< MAXPANEL-BANNER <<<$/d' /etc/bash.bashrc 2>/dev/null
+    sed -i '/^# >>> MAXPANEL-PROFILE-LOADER >>>$/,/^# <<< MAXPANEL-PROFILE-LOADER <<<$/d' /etc/profile 2>/dev/null
 
     # Hapus user yang dibuat panel (SSH/OpenVPN/SlowDNS DB)
     for db in "$SSH_DB" "$OVPN_DB" "$SLOW_DB"; do
