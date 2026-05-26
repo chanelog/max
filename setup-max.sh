@@ -10,7 +10,7 @@
 #   Protokol terinstall:
 #     • OpenSSH (22, 99, 169, 2269, 3369)
 #     • Dropbear (109, 143, 300, 1153)
-#     • Stunnel SSL (8000) → Dropbear:109
+#     • Stunnel SSL (444, 445, 8443) → Dropbear:109 + internal :7777
 #     • SSLH multiplexer (8000) → SSH / SSL / HTTP / WS
 #     • Nginx HTTP/TLS (80, 89, 443, 8880)
 #     • SSH WebSocket via Nginx     → /cdn (CDN-ready: 80, 443, 8880)
@@ -644,7 +644,7 @@ _tg_render_ssh() {
 🔌 <b>WS HTTP</b>  : <code>80, 8880, 8000 (/cdn)</code>
 🔒 <b>WS SSL/TLS</b>: <code>443, 8000 (/cdn)</code>
 🔒 <b>SSLH</b>     : <code>8000</code>
-🔒 <b>STUNNEL5</b> : <code>8000</code>
+🔒 <b>STUNNEL5</b> : <code>444, 445, 8443, 8000 (mux)</code>
 🐢 <b>SlowDNS</b>  : <code>5300, 2269, 3369</code>
 📡 <b>UDPGW</b>    : <code>7100, 7200, 7300</code>
 🌐 <b>Nginx</b>    : <code>80, 443, 89</code>
@@ -1284,10 +1284,14 @@ install_ssh() {
     ok "Dropbear siap: 109, 143, 300, 1153"
 
     # ── Stunnel SSL ─────────────────────────────────────────────────────
-    # Listen di 127.0.0.1:7777 (internal). SSLH publik di :8000 yang akan
-    # forward TLS-handshake → stunnel:7777 → Dropbear:109.
-    inf "Konfigurasi Stunnel SSL (internal :7777 → Dropbear:109)..."
+    # FIX: Listener public di port 444, 445, 8443 + internal 7777 (untuk SSLH).
+    # Banyak app klien (HTTP Injector, KPN Tunnel, dll) konek SSL langsung ke
+    # 444/8443 — sebelumnya cuma 7777 (internal) jadi SSL putus dari luar.
+    inf "Konfigurasi Stunnel SSL (public :444, :445, :8443 → Dropbear:109 + internal :7777)..."
     mkdir -p /etc/stunnel
+    # Bersihkan PID basi yang sering bikin start gagal
+    rm -f /var/run/stunnel.pid /var/run/stunnel4/stunnel.pid 2>/dev/null
+
     if [[ ! -s /etc/stunnel/stunnel.pem ]]; then
         openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
             -subj "/C=ID/ST=JKT/L=Jakarta/O=MAX/OU=Panel/CN=maxpanel" \
@@ -1296,28 +1300,73 @@ install_ssh() {
         chmod 600 /etc/stunnel/key.pem /etc/stunnel/stunnel.pem
         chmod 644 /etc/stunnel/cert.pem
     fi
+    # FIX: stunnel4 berjalan as user `stunnel4` → /var/run/stunnel4 harus owned.
+    # Di systemd modern /var/run = tmpfs → wajib re-create tiap boot.
     mkdir -p /var/run/stunnel4
-    chown stunnel4:stunnel4 /var/run/stunnel4 2>/dev/null || true
+    chown -R stunnel4:stunnel4 /var/run/stunnel4 2>/dev/null || true
+
+    # Tulis config (4 listener: 3 public + 1 internal untuk SSLH).
+    # `[dropbear-ssl]` tetap accept di 127.0.0.1:7777 supaya SSLH masih jalan.
     cat > /etc/stunnel/stunnel.conf <<'STUN'
+; MAX PANEL — Stunnel SSL → Dropbear bridge
 cert = /etc/stunnel/stunnel.pem
 pid = /var/run/stunnel4/stunnel.pid
 client = no
 socket = a:SO_REUSEADDR=1
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
+sslVersion = all
+options = NO_SSLv2
+options = NO_SSLv3
+TIMEOUTclose = 0
+debug = 0
+output = /var/log/stunnel4/stunnel.log
+
+[dropbear-ssl-444]
+accept = 0.0.0.0:444
+connect = 127.0.0.1:109
+
+[dropbear-ssl-445]
+accept = 0.0.0.0:445
+connect = 127.0.0.1:109
+
+[dropbear-ssl-8443]
+accept = 0.0.0.0:8443
+connect = 127.0.0.1:109
 
 [dropbear-ssl]
 accept = 127.0.0.1:7777
 connect = 127.0.0.1:109
 STUN
     chmod 600 /etc/stunnel/stunnel.pem 2>/dev/null
-    sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/stunnel4 2>/dev/null
-    [[ -f /etc/default/stunnel4 ]] || echo "ENABLED=1" > /etc/default/stunnel4
+    mkdir -p /var/log/stunnel4
+    chown -R stunnel4:stunnel4 /var/log/stunnel4 2>/dev/null || true
+
+    # Aktifkan via /etc/default/stunnel4 (Debian wrapper lama)
+    if [[ -f /etc/default/stunnel4 ]]; then
+        sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+    else
+        echo "ENABLED=1" > /etc/default/stunnel4
+    fi
+
+    # Buka firewall untuk port public SSL
+    for p in 444 445 8443; do
+        ufw allow "$p"/tcp &>/dev/null || true
+    done
+
+    systemctl daemon-reload 2>/dev/null
     systemctl enable stunnel4 &>/dev/null
-    pkill -9 stunnel4 2>/dev/null; rm -f /var/run/stunnel4/stunnel.pid
+    pkill -9 stunnel4 2>/dev/null
+    rm -f /var/run/stunnel4/stunnel.pid 2>/dev/null
     sleep 1
     systemctl restart stunnel4 2>/dev/null
-    ok "Stunnel internal siap (127.0.0.1:7777, di-mux via SSLH:8000)"
+    sleep 1
+
+    if is_up stunnel4; then
+        ok "Stunnel SSL aktif: public :444, :445, :8443 + internal :7777 → Dropbear:109"
+    else
+        warn "Stunnel belum aktif — cek: journalctl -u stunnel4 -n 30"
+    fi
 }
 
 # ════════════════════════════════════════════════════════════
@@ -2039,9 +2088,11 @@ install_sslh() {
         return 1
     fi
 
-    # Config SSLH (pakai sslh-select untuk efisiensi)
+    # Config SSLH — pakai sslh-select, hapus opsi --ssl (deprecated, alias dari --tls).
+    # Tambah --timeout 5 dan --anyprot fallback ke SSH supaya client SSL/SSH-injector
+    # yang kirim payload non-standar tidak langsung di-drop.
     cat > /etc/default/sslh <<'SSLHCONF'
-# MAX PANEL — SSLH multiplexer
+# MAX PANEL — SSLH multiplexer (port 8000 → SSH / SSL / HTTP / WS)
 RUN=yes
 DAEMON=/usr/sbin/sslh
 DAEMON_OPTS="--user sslh \
@@ -2049,7 +2100,8 @@ DAEMON_OPTS="--user sslh \
     --ssh 127.0.0.1:22 \
     --tls 127.0.0.1:7777 \
     --http 127.0.0.1:80 \
-    --ssl 127.0.0.1:443 \
+    --anyprot 127.0.0.1:22 \
+    --timeout 5 \
     --pidfile /var/run/sslh/sslh.pid"
 SSLHCONF
 
@@ -2376,7 +2428,7 @@ do_install_all() {
     echo -e "  ${A1}${_DASH}${NC}"
     printf  "  ${A3}•${NC} OpenSSH         : ${Y}22, 99, 169, 2269, 3369${NC}\n"
     printf  "  ${A3}•${NC} Dropbear        : ${Y}109, 143, 300, 1153${NC}\n"
-    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}127.0.0.1:7777${NC} (mux via SSLH:8000)\n"
+    printf  "  ${A3}•${NC} Stunnel SSL     : ${Y}444, 445, 8443${NC} public + ${Y}127.0.0.1:7777${NC} (mux via SSLH:8000)\n"
     printf  "  ${A3}•${NC} SSLH multiplexer: ${Y}8000${NC} (auto-detect SSH / SSL / HTTP / WS)\n"
     printf  "  ${A3}•${NC} Nginx (HTTP)    : ${Y}80, 89${NC}  — paths: /vmess /vless /trojan-ws /cdn\n"
     printf  "  ${A3}•${NC} Nginx (TLS)     : ${Y}443${NC} — + /vless-grpc /trojan-grpc /ss-ws /ss-grpc\n"
