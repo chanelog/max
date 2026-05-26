@@ -2539,7 +2539,7 @@ ssh_renew() {
     new_exp=$(TZ="Asia/Jakarta" date -d "${cur_exp} +${d} days" +"%Y-%m-%d" 2>/dev/null)
     [[ -z "$new_exp" ]] && new_exp=$(mk_exp "$d")
 
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new_exp}|" "$SSH_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new_exp}#" "$SSH_DB"
     chage -E "$new_exp" "$u" 2>/dev/null
     ok "Akun ${W}${u}${NC} diperpanjang sampai ${Y}${new_exp}${NC}"
     pause
@@ -2786,7 +2786,7 @@ vmess_renew() {
     local cur new
     cur=$(grep "^${u}|" "$VMESS_DB" | cut -d'|' -f3)
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new}|" "$VMESS_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new}#" "$VMESS_DB"
     ok "VMess ${W}${u}${NC} diperpanjang → ${Y}${new}${NC}"
     pause
 }
@@ -2876,7 +2876,7 @@ vless_renew() {
     local cur new
     cur=$(grep "^${u}|" "$VLESS_DB" | cut -d'|' -f3)
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new}|" "$VLESS_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new}#" "$VLESS_DB"
     ok "Diperpanjang → ${Y}${new}${NC}"
     pause
 }
@@ -2958,7 +2958,7 @@ trojan_renew() {
     local cur new
     cur=$(grep "^${u}|" "$TROJAN_DB" | cut -d'|' -f3)
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new}|" "$TROJAN_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new}#" "$TROJAN_DB"
     ok "Diperpanjang → ${Y}${new}${NC}"
     pause
 }
@@ -3184,7 +3184,7 @@ tgo_renew() {
     local cur new
     cur=$(grep "^${u}|" "$TROJANGO_DB" | cut -d'|' -f3)
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new}|" "$TROJANGO_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new}#" "$TROJANGO_DB"
     ok "Diperpanjang → ${Y}${new}${NC}"
     pause
 }
@@ -3314,7 +3314,7 @@ hy_renew() {
     local cur new
     cur=$(grep "^${u}|" "$HY_DB" | cut -d'|' -f3)
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new}|" "$HY_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new}#" "$HY_DB"
     ok "Diperpanjang → ${Y}${new}${NC}"
     pause
 }
@@ -3460,7 +3460,7 @@ ovpn_renew() {
     local cur new
     cur=$(grep "^${u}|" "$OVPN_DB" | cut -d'|' -f3)
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new}|" "$OVPN_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new}#" "$OVPN_DB"
     chage -E "$new" "$u" 2>/dev/null
     ok "Diperpanjang → ${Y}${new}${NC}"
     pause
@@ -3615,7 +3615,7 @@ wg_renew() {
     local cur new
     cur=$(grep "^${u}|" "$WG_DB" | awk -F'|' '{print $5}')
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|[^|]*|[^|]*|\)[^|]*|\1${new}|" "$WG_DB"
+    sed -i "s#^\(${u}|[^|]*|[^|]*|[^|]*|\)[^|]*#\1${new}#" "$WG_DB"
     ok "Diperpanjang → ${Y}${new}${NC}"
     pause
 }
@@ -3717,7 +3717,7 @@ slow_renew() {
     local cur new
     cur=$(grep "^${u}|" "$SLOW_DB" | cut -d'|' -f3)
     new=$(TZ="Asia/Jakarta" date -d "${cur} +${d} days" +"%Y-%m-%d" 2>/dev/null || mk_exp "$d")
-    sed -i "s|^\(${u}|[^|]*|\)[^|]*|\1${new}|" "$SLOW_DB"
+    sed -i "s#^\(${u}|[^|]*|\)[^|]*#\1${new}#" "$SLOW_DB"
     chage -E "$new" "$u" 2>/dev/null
     ok "Diperpanjang → ${Y}${new}${NC}"
     pause
