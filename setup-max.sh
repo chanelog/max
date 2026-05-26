@@ -1182,27 +1182,28 @@ install_deps() {
 # dan plain-text fallback kalau client tidak support warna.
 write_default_banner() {
     local target="${1:-/etc/issue.net}"
-    cat > "$target" <<'BANNER_EOF'
+    # NOTE: pakai printf '%b' supaya \033 (ESC) di-translate jadi karakter ANSI
+    # asli (0x1B). Heredoc quoted ('EOF') akan menulis '\033' apa adanya
+    # sebagai 4 karakter literal — banner tidak akan ber-warna.
+    printf '%b' '
+       \033[1;37m┌──────────\033[0m\033[1;32m》  《\033[0m\033[1;37m──────────┐\033[0m
+              \033[1;32m\xe2\x88\x9e MAX-PAN SSH \xe2\x88\x9e\033[0m
+       \033[1;37m┌──────────\033[0m\033[1;32m》  《\033[0m\033[1;37m──────────┐\033[0m
+                  \033[1;33m》 RULLES 《\033[0m
+                 \033[1;32mNO MULTILOGIN\033[0m
+                  \033[1;35mNO PORN 18+\033[0m
+                    \033[1;36mNO DDOS\033[0m
+                  \033[1;33mNO TORRENT\033[0m
+                  \033[1;35mNO HACKING\033[0m
+                    \033[1;37mNO SPAM\033[0m
+                   \033[1;37mNO CARDING\033[0m
+              \033[1;31mMELANGGAR AUTO BANNED\033[0m
+       \033[1;37m┌──────────\033[0m\033[1;32m》\033[0m \033[1;33m`(°_°)´\033[0m \033[1;32m《\033[0m\033[1;37m──────────┐\033[0m
+                     \033[1;37m》 《\033[0m
+            \033[1;37mORDER : wa.me/6283825566891\033[0m
+                     \033[1;37m》 《\033[0m
 
-  [1;36m============================[0m
-  [1;33m       MAX-PAN SSH[0m
-  [1;36m============================[0m
-  [1;31m         - RULES -[0m
-
-      [1;37mNO MULTILOGIN[0m
-      [1;37mNO PORN 18+[0m
-      [1;37mNO DDOS[0m
-      [1;37mNO TORRENT[0m
-      [1;37mNO HACKING[0m
-      [1;37mNO SPAM[0m
-      [1;37mNO CARDING[0m
-
-  [1;31m   MELANGGAR AUTO BANNED[0m
-  [1;36m============================[0m
-  [1;32m ORDER: wa.me/6283825566891[0m
-  [1;36m============================[0m
-
-BANNER_EOF
+' > "$target"
     chmod 644 "$target" 2>/dev/null
     # Sinkronkan ke /etc/issue (login lokal/console) juga supaya konsisten
     cp -f "$target" /etc/issue 2>/dev/null
