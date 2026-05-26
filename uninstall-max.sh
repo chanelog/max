@@ -76,6 +76,8 @@ SVCS=(
     nginx
     stunnel4
     dropbear
+    sslh
+    squid
 
     # WebSocket — versi baru (ws-epro)
     ws.service ws

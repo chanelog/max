@@ -145,23 +145,29 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────
-# 9. Squid Proxy (SQ) — port 80, 8000, 3128
+# 9. SSLH multiplexer (port 8000) — SSH / SSL / HTTP / WS
 # ────────────────────────────────────────────────────────────
-inf "Mengecek Squid Proxy (SQ)..."
-if ! command -v squid &>/dev/null; then
-    inf "Squid belum terinstall, menginstall..."
-    apt-get install -y squid -qq 2>/dev/null && ok "Squid terinstall"
+inf "Mengecek SSLH multiplexer (SLH)..."
+if ! command -v sslh &>/dev/null; then
+    inf "SSLH belum terinstall, menginstall..."
+    echo 'sslh sslh/inetd_or_standalone select standalone' | debconf-set-selections 2>/dev/null
+    apt-get install -y sslh -qq 2>/dev/null && ok "SSLH terinstall"
 fi
-if [[ -f /etc/squid/squid.conf ]]; then
-    # Pastikan port 80 tidak dipegang process lain (mis. apache2)
+if [[ -f /etc/default/sslh ]]; then
+    # Pastikan port 8000 tidak dipegang process lain (apache/squid lama)
     if systemctl is-active --quiet apache2 2>/dev/null; then
-        warn "Apache2 aktif di port 80 — stop & disable"
+        warn "Apache2 aktif — stop & disable"
         systemctl stop apache2 2>/dev/null
         systemctl disable apache2 2>/dev/null
     fi
-    fix_svc squid "Squid Proxy (SQ)"
+    if systemctl is-active --quiet squid 2>/dev/null; then
+        warn "Squid lama masih aktif — stop & disable (sudah diganti SSLH)"
+        systemctl stop squid 2>/dev/null
+        systemctl disable squid 2>/dev/null
+    fi
+    fix_svc sslh "SSLH multiplexer (SLH)"
 else
-    warn "Squid: /etc/squid/squid.conf belum ada — jalankan installer panel dulu"
+    warn "SSLH: /etc/default/sslh belum ada — jalankan installer panel dulu"
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -198,7 +204,7 @@ echo -e "  ${BOLD}  Status Akhir${NC}"
 echo -e "  ${CYAN}══════════════════════════════════════════════${NC}"
 echo ""
 
-services=(ssh dropbear stunnel4 xray trojan-go hysteria-server openvpn "wg-quick@wg0" squid ws nginx)
+services=(ssh dropbear stunnel4 xray trojan-go hysteria-server openvpn "wg-quick@wg0" sslh ws nginx)
 labels=(SSH DR STN XRY TGO HY OVPN WG SQ WS NGX)
 
 for i in "${!services[@]}"; do
