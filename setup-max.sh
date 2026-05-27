@@ -222,7 +222,7 @@ OHP_URL="https://github.com/chanelog/max/raw/main/ohpserver"
 WS_URL="https://raw.githubusercontent.com/chanelog/max/main/ws"
 WS_SERVICE_URL="https://raw.githubusercontent.com/chanelog/max/main/ws.service"
 
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.1"
 SCRIPT_URL="https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh"
 VERSION_URL="https://raw.githubusercontent.com/chanelog/max/main/version-max.txt"
 
@@ -1372,10 +1372,29 @@ WantedBy=multi-user.target
 XEOF
     systemctl daemon-reload
     systemctl enable xray &>/dev/null
+
+    # Validasi config dulu sebelum start
+    if ! "$XRAY_BIN" -test -config "$XRAY_CFG" &>/dev/null; then
+        err "Config Xray tidak valid — cek: ${W}$XRAY_BIN -test -config $XRAY_CFG${NC}"
+        return 1
+    fi
+
     systemctl restart xray 2>/dev/null
-    sleep 1
-    if is_up xray; then ok "Xray-core service aktif"
-    else warn "Xray belum aktif — coba: journalctl -u xray -n 20"
+    sleep 2
+
+    # Retry sekali kalau belum up (kadang first-start lambat)
+    if ! is_up xray; then
+        sleep 2
+        systemctl restart xray 2>/dev/null
+        sleep 2
+    fi
+
+    if is_up xray; then
+        ok "Xray-core service aktif (port 10001-10007 + 8388)"
+    else
+        warn "Xray belum aktif — cek log:"
+        warn "  ${W}journalctl -u xray -n 30 --no-pager${NC}"
+        warn "  ${W}tail -20 /var/log/xray/error.log${NC}"
     fi
 }
 
@@ -1738,12 +1757,11 @@ NGX
 # ════════════════════════════════════════════════════════════
 #  INSTALLER — Squid Proxy (3128, 8080) — default OFF
 # ────────────────────────────────────────────────────────────
-#  Squid di-install untuk port 3128 + 8080 sesuai layout, namun
-#  service-nya disabled by default (sesuai gambar: "OFF").
-#  User bisa enable manual via:  systemctl enable --now squid
+#  Squid di-install untuk port 3128 + 8080 sesuai layout.
+#  Default ON — service auto-start saat install.
 # ════════════════════════════════════════════════════════════
 install_squid() {
-    inf "Install Squid Proxy (3128, 8080) — default OFF..."
+    inf "Install Squid Proxy (3128, 8080)..."
     if ! command -v squid &>/dev/null; then
         apt-get install -y -qq squid 2>/dev/null || {
             warn "Gagal install Squid — fitur opsional dilewati"
@@ -1756,21 +1774,57 @@ install_squid() {
     [[ -f /etc/squid3/squid.conf && ! -f "$cfg" ]] && cfg=/etc/squid3/squid.conf
 
     if [[ -f "$cfg" ]]; then
-        # Idempotent: hanya tambahkan baris kalau belum ada
-        if ! grep -qE '^http_port[[:space:]]+3128' "$cfg"; then
-            sed -i '/^http_port[[:space:]]\+/d' "$cfg"
-            {
-                echo ""
-                echo "# MAX PANEL — multi-port (default OFF)"
-                echo "http_port 3128"
-                echo "http_port 8080"
-            } >> "$cfg"
+        # Idempotent: backup lalu tulis ulang minimal config yang allow all + multi-port
+        if ! grep -q "MAX PANEL" "$cfg" 2>/dev/null; then
+            cp -a "$cfg" "${cfg}.bak.$(date +%s)" 2>/dev/null
+            cat > "$cfg" <<'SQCFG'
+# MAX PANEL — Squid Proxy Config
+http_port 3128
+http_port 8080
+
+acl all src 0.0.0.0/0
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 21
+acl Safe_ports port 443
+acl Safe_ports port 70
+acl Safe_ports port 210
+acl Safe_ports port 1025-65535
+acl Safe_ports port 280
+acl Safe_ports port 488
+acl Safe_ports port 591
+acl Safe_ports port 777
+acl CONNECT method CONNECT
+
+http_access allow all
+http_access allow manager localhost
+http_access deny manager
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+
+coredump_dir /var/spool/squid
+visible_hostname maxpanel
+forwarded_for delete
+via off
+SQCFG
         fi
     fi
 
-    # Default OFF — disable & stop, biar user manual enable.
-    systemctl disable --now squid 2>/dev/null
-    ok "Squid Proxy terpasang (3128, 8080) — service: ${LR}OFF${NC} (manual enable)"
+    # Buka firewall
+    for p in 3128 8080; do
+        ufw allow "$p"/tcp &>/dev/null || true
+    done
+
+    # Default ON — enable & start
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable squid &>/dev/null
+    systemctl restart squid 2>/dev/null
+    sleep 2
+    if is_up squid; then
+        ok "Squid Proxy aktif (3128, 8080) — service: ${LG}ON${NC}"
+    else
+        warn "Squid gagal start — cek: ${W}journalctl -u squid -n 30${NC}"
+    fi
 }
 
 
@@ -1828,16 +1882,28 @@ UEOF
 
     systemctl daemon-reload
 
+    local ohp_ok=0 ohp_fail=0
     for svc in ohp-ssh ohp-dropbear ohp-openvpn; do
         systemctl enable "$svc" &>/dev/null
         systemctl restart "$svc" 2>/dev/null
+        sleep 1
+        if systemctl is-active --quiet "$svc"; then
+            ((ohp_ok++))
+        else
+            ((ohp_fail++))
+            warn "  ${svc} gagal start — cek: ${W}journalctl -u ${svc} -n 20${NC}"
+        fi
     done
 
     for p in 8181 8282 8383; do
         ufw allow "$p"/tcp &>/dev/null || true
     done
 
-    ok "OHP aktif: SSH:8181 | Dropbear:8282 | OpenVPN:8383"
+    if [[ "$ohp_fail" -eq 0 ]]; then
+        ok "OHP aktif: SSH:8181 | Dropbear:8282 | OpenVPN:8383"
+    else
+        warn "OHP: ${ohp_ok} aktif, ${ohp_fail} gagal — pastikan SSH/Dropbear/OpenVPN sudah running dulu"
+    fi
 }
 
 # ════════════════════════════════════════════════════════════
