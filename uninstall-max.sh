@@ -4,11 +4,11 @@
 #   Repo: https://github.com/chanelog/max
 # ────────────────────────────────────────────────────────────
 #   Hapus seluruh jejak MAX PANEL dari VPS:
-#     • Service systemd (xray, trojan-go, hysteria, ws-*, slowdns, dst)
+#     • Service systemd (xray, ws.service, ohp-*, badvpn-udpgw-*, sslh)
 #     • Binary di /usr/bin & /usr/local/bin
-#     • Config /etc/{maxpanel,xray,trojan-go,hysteria,wireguard,openvpn,slowdns,stunnel}
-#     • Nginx vhost panel (/etc/nginx/conf.d/xray.conf)
-#     • User sistem yang dibuat panel (SSH/OVPN/SlowDNS)
+#     • Config /etc/{maxpanel,xray,stunnel,squid,nginx/conf.d/xray}
+#     • Nginx vhost panel
+#     • User sistem yang dibuat panel (SSH)
 #     • Cron job, splash banner, alias, log
 #     • iptables rule yang di-inject panel
 #     • Backup lokal (opsional, konfirmasi)
@@ -63,30 +63,22 @@ DEL_BACKUP="${DEL_BACKUP,,}"
 echo ""
 
 # ════════════════════════════════════════════════════════════
-hdr "1/9  Menghentikan & disable semua service panel"
+hdr "1/8  Menghentikan & disable semua service panel"
 # ════════════════════════════════════════════════════════════
 SVCS=(
     # Core panel services
     xray
-    trojan-go
-    hysteria-server
-    wg-quick@wg0
-    slowdns
-    ohp
     nginx
     stunnel4
     dropbear
     sslh
     squid
 
-    # WebSocket — versi baru (ws-epro)
+    # WebSocket
     ws.service ws
 
-    # WebSocket — legacy (Python ws-proxy)
-    ws-max-80 ws-max-2095 ws-max-8881
-
-    # OpenVPN
-    openvpn-server@tcp openvpn-server@udp openvpn@server
+    # OHP (3 instance)
+    ohp ohp-ssh ohp-dropbear ohp-openvpn
 
     # BadVPN UDPGW (multi-port)
     badvpn-udpgw-7100 badvpn-udpgw-7200 badvpn-udpgw-7300
@@ -100,28 +92,20 @@ for s in "${SVCS[@]}"; do
     fi
 done
 
-# Kill leftover proses (jika service file sudah hilang tapi proses jalan)
+# Kill leftover proses
 pkill -9 -f '/usr/bin/ws ' 2>/dev/null
-pkill -9 -f 'ws-max'        2>/dev/null
-pkill -9 -f 'xray'          2>/dev/null
-pkill -9 -f 'trojan-go'     2>/dev/null
-pkill -9 -f 'hysteria'      2>/dev/null
-pkill -9 -f 'sldns-server'  2>/dev/null
-pkill -9 -f 'ohpserver'     2>/dev/null
-pkill -9 -f 'badvpn-udpgw'  2>/dev/null
+pkill -9 -f 'xray'         2>/dev/null
+pkill -9 -f 'ohpserver'    2>/dev/null
+pkill -9 -f 'badvpn-udpgw' 2>/dev/null
 
 # ════════════════════════════════════════════════════════════
-hdr "2/9  Menghapus systemd unit files"
+hdr "2/8  Menghapus systemd unit files"
 # ════════════════════════════════════════════════════════════
 SYSD=/etc/systemd/system
 UNITS=(
     xray.service
-    trojan-go.service
-    hysteria-server.service
-    slowdns.service
-    ohp.service
+    ohp.service ohp-ssh.service ohp-dropbear.service ohp-openvpn.service
     ws.service
-    ws-max-80.service ws-max-2095.service ws-max-8881.service
     badvpn-udpgw-7100.service badvpn-udpgw-7200.service badvpn-udpgw-7300.service
 )
 
@@ -130,24 +114,19 @@ for u in "${UNITS[@]}"; do
         rm -f "$SYSD/$u" && ok "rm    $SYSD/$u"
     fi
 done
-# Sapu jika ada glob-pattern lain (paranoid)
-rm -f "$SYSD"/badvpn-udpgw-*.service "$SYSD"/ws-max-*.service 2>/dev/null
+rm -f "$SYSD"/badvpn-udpgw-*.service "$SYSD"/ohp-*.service 2>/dev/null
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null
 
 # ════════════════════════════════════════════════════════════
-hdr "3/9  Menghapus binary"
+hdr "3/8  Menghapus binary"
 # ════════════════════════════════════════════════════════════
 BINS=(
     /usr/bin/ws
     /usr/bin/tun.conf
-    /usr/local/bin/ws-max
     /usr/local/bin/xray
-    /usr/local/bin/trojan-go
-    /usr/local/bin/hysteria
     /usr/local/bin/badvpn-udpgw
-    /usr/local/bin/sldns-server
     /usr/local/bin/ohpserver
     /usr/local/bin/menu-max
     /usr/local/bin/max-menu
@@ -159,12 +138,10 @@ for b in "${BINS[@]}"; do
 done
 
 # ════════════════════════════════════════════════════════════
-hdr "4/9  Hapus user sistem yang dibuat panel"
+hdr "4/8  Hapus user sistem yang dibuat panel"
 # ════════════════════════════════════════════════════════════
 DBS=(
     /etc/maxpanel/ssh-users.db
-    /etc/maxpanel/openvpn-users.db
-    /etc/maxpanel/slowdns-users.db
 )
 
 for db in "${DBS[@]}"; do
@@ -178,14 +155,11 @@ for db in "${DBS[@]}"; do
 done
 
 # ════════════════════════════════════════════════════════════
-hdr "5/9  Hapus direktori config"
+hdr "5/8  Hapus direktori config"
 # ════════════════════════════════════════════════════════════
 DIRS=(
     /etc/maxpanel
     /etc/xray
-    /etc/trojan-go
-    /etc/hysteria
-    /etc/slowdns
     /var/log/xray
     /var/log/maxpanel
 )
@@ -195,19 +169,7 @@ for d in "${DIRS[@]}"; do
     fi
 done
 
-# WireGuard, OpenVPN, Stunnel — cleanup file panel saja (tidak hapus paket)
-rm -f /etc/wireguard/wg0.conf \
-      /etc/wireguard/server_private.key \
-      /etc/wireguard/server_public.key 2>/dev/null
-ok    "wipe wireguard wg0"
-
-if [[ -d /etc/openvpn/server ]]; then
-    rm -rf /etc/openvpn/server /etc/openvpn/easy-rsa /etc/openvpn/client 2>/dev/null
-    rm -f  /var/log/openvpn-tcp.log /var/log/openvpn-udp.log \
-           /var/log/openvpn-tcp-status.log /var/log/openvpn-udp-status.log 2>/dev/null
-    ok "wipe openvpn server/easy-rsa/client"
-fi
-
+# Stunnel — cleanup file panel saja
 if [[ -f /etc/stunnel/stunnel.conf ]]; then
     rm -f /etc/stunnel/stunnel.conf \
           /etc/stunnel/stunnel.pem  \
@@ -216,22 +178,26 @@ if [[ -f /etc/stunnel/stunnel.conf ]]; then
     ok "wipe stunnel config & cert"
 fi
 
-# Nginx vhost panel saja (jangan apus default site)
+# Nginx vhost panel saja
 rm -f /etc/nginx/conf.d/xray.conf 2>/dev/null && ok "rm    /etc/nginx/conf.d/xray.conf"
 
+# Squid — restore default tanpa multi-port
+if [[ -f /etc/squid/squid.conf ]]; then
+    sed -i '/^# MAX PANEL — multi-port/,/^http_port 8080$/d' /etc/squid/squid.conf 2>/dev/null
+    ok "restore squid default"
+fi
+
 # ════════════════════════════════════════════════════════════
-hdr "6/9  Hapus cron jobs panel"
+hdr "6/8  Hapus cron jobs panel"
 # ════════════════════════════════════════════════════════════
 rm -f /etc/cron.d/maxpanel-* 2>/dev/null
-# Trial-* cron files
 rm -f /etc/cron.d/trial-* 2>/dev/null
 ok "rm    /etc/cron.d/{maxpanel-*,trial-*}"
 
-# Restart cron biar reload daftar
 systemctl restart cron 2>/dev/null || service cron restart 2>/dev/null
 
 # ════════════════════════════════════════════════════════════
-hdr "7/9  Cleanup bashrc, profile, splash"
+hdr "7/8  Cleanup bashrc, profile, splash"
 # ════════════════════════════════════════════════════════════
 for rc in /root/.bashrc /root/.profile /etc/profile.d/max-panel.sh; do
     if [[ -f "$rc" ]]; then
@@ -245,11 +211,11 @@ rm -f /etc/profile.d/max-panel.sh \
       /etc/max-panel-splash.sh 2>/dev/null
 ok "wipe alias menu-max / splash banner"
 
-# Restore SSH config (port 2222 -> 22 default kembali, opsional)
+# Restore SSH config
 if [[ -f /etc/ssh/sshd_config ]]; then
     if grep -qE '^Port[[:space:]]+2222$' /etc/ssh/sshd_config; then
         sed -i '/^Port[[:space:]]\+2222$/d' /etc/ssh/sshd_config
-        warn "OpenSSH: dihapus 'Port 2222' dari sshd_config (default 22 aktif)"
+        warn "OpenSSH: dihapus 'Port 2222' dari sshd_config"
     fi
 fi
 
@@ -258,33 +224,6 @@ if [[ -f /etc/default/dropbear ]]; then
     sed -i '/^DROPBEAR_PORT=/d'       /etc/default/dropbear 2>/dev/null
     sed -i '/^DROPBEAR_EXTRA_ARGS=/d' /etc/default/dropbear 2>/dev/null
 fi
-
-# ════════════════════════════════════════════════════════════
-hdr "8/9  Bersihkan iptables rules MAX PANEL"
-# ════════════════════════════════════════════════════════════
-# Range UDP Hysteria
-iptables -t nat -D PREROUTING -p udp --dport 6000:19999 -j DNAT --to-destination :36712 2>/dev/null
-
-# SlowDNS redirect
-iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
-
-# Hysteria & SlowDNS UDP allow
-iptables -D INPUT -p udp --dport 36712 -j ACCEPT 2>/dev/null
-iptables -D INPUT -p udp --dport 5300  -j ACCEPT 2>/dev/null
-iptables -D INPUT -p udp --dport 7300  -j ACCEPT 2>/dev/null
-
-# OpenVPN MASQUERADE
-IFACE=$(ip -4 route ls 2>/dev/null | awk '/default/ {print $5; exit}')
-if [[ -n "$IFACE" ]]; then
-    iptables -t nat -D POSTROUTING -s 10.200.0.0/24 -o "$IFACE" -j MASQUERADE 2>/dev/null
-    iptables -t nat -D POSTROUTING -s 10.201.0.0/24 -o "$IFACE" -j MASQUERADE 2>/dev/null
-    iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null  # WireGuard
-fi
-iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null
-
-# Persist
-netfilter-persistent save &>/dev/null
-ok "iptables rules MAX PANEL dibersihkan"
 
 # Bersihkan sysctl tuning blok
 for f in /etc/sysctl.conf; do
@@ -295,7 +234,7 @@ rm -f /etc/modules-load.d/maxpanel.conf 2>/dev/null
 ok "wipe sysctl MAXPANEL-* blocks"
 
 # ════════════════════════════════════════════════════════════
-hdr "9/9  Hapus backup lokal (opsional)"
+hdr "8/8  Hapus backup lokal (opsional)"
 # ════════════════════════════════════════════════════════════
 if [[ "$DEL_BACKUP" == "y" ]]; then
     if [[ -d /root/maxpanel-backup ]]; then
@@ -321,10 +260,6 @@ echo ""
 echo -e "  ${C}Selanjutnya:${NC} install ulang script terbaru"
 echo ""
 echo -e "  ${W}wget -O setup-max.sh https://raw.githubusercontent.com/chanelog/max/main/setup-max.sh${NC}"
-echo -e "  ${W}chmod +x setup-max.sh && bash setup-max.sh${NC}"
-echo ""
-echo -e "  ${D}Atau langsung dari branch PR (sebelum merge):${NC}"
-echo -e "  ${W}wget -O setup-max.sh https://raw.githubusercontent.com/chanelog/max/feat/ws-epro-binary/setup-max.sh${NC}"
 echo -e "  ${W}chmod +x setup-max.sh && bash setup-max.sh${NC}"
 echo ""
 warn "Disarankan REBOOT VPS sebelum install ulang: ${W}reboot${NC}"
