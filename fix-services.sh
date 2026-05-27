@@ -122,15 +122,12 @@ for n in ssh dropbear openvpn; do
     fix_svc "ohp-${n}" "OHP ${n}"
 done
 
-# 10. Squid Proxy — default OFF (3128, 8080)
-inf "Mengecek Squid Proxy (default OFF)..."
-if systemctl list-unit-files --quiet squid 2>/dev/null | grep -q squid; then
-    if systemctl is-active --quiet squid; then
-        ok "Squid Proxy — ${GREEN}AKTIF${NC} (manual enable)"
-    else
-        warn "Squid Proxy — ${YELLOW}OFF${NC} (sesuai default)"
-    fi
+# 10. Squid Proxy — port 3128, 8080 (default ON)
+inf "Mengecek Squid Proxy..."
+if ! command -v squid &>/dev/null; then
+    apt-get install -y squid -qq 2>/dev/null && ok "Squid terinstall"
 fi
+fix_svc squid "Squid Proxy (SQ)"
 
 # Reload daemon & ringkasan
 echo ""
@@ -152,8 +149,6 @@ for i in "${!services[@]}"; do
     lbl="${labels[$i]}"
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
         echo -e "  ${GREEN}●${NC} ${lbl} (${svc}) — ${GREEN}AKTIF${NC}"
-    elif [[ "$svc" == "squid" ]]; then
-        echo -e "  ${YELLOW}●${NC} ${lbl} (${svc}) — ${YELLOW}OFF (default)${NC}"
     else
         echo -e "  ${RED}●${NC} ${lbl} (${svc}) — ${RED}TIDAK AKTIF${NC}"
     fi
