@@ -171,53 +171,25 @@ BANNERF="$DIR/banner.txt"
 MLDB="$DIR/maxlogin.db"      # format: username|maxdevice
 LIMITF="$DIR/limit.conf"     # max total user
 VERSIONF="$DIR/version.txt"
-
 # User databases per protokol
 SSH_DB="$DIR/ssh-users.db"           # user|pass|exp|maxlogin
 VMESS_DB="$DIR/vmess-users.db"       # user|uuid|exp|maxlogin
 VLESS_DB="$DIR/vless-users.db"       # user|uuid|exp|maxlogin
 TROJAN_DB="$DIR/trojan-users.db"     # user|password|exp|maxlogin
-
-
-
-
-
-
-
 # Path config service
 XRAY_CFG="/etc/xray/config.json"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_CRT="/etc/xray/xray.crt"
 XRAY_KEY="/etc/xray/xray.key"
 XRAY_LOG="/var/log/xray/access.log"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 UDPGW_BIN="/usr/local/bin/badvpn-udpgw"
 WS_DIR="/etc/maxpanel/ws"
 WS_BIN="/usr/bin/ws"
 TUN_CONF="/usr/bin/tun.conf"
 OHP_BIN="/usr/local/bin/ohpserver"
-
 # URLs binary
 XRAY_URL="https://github.com/chanelog/max/releases/download/bin/Xray-linux-64.zip"
-
-
 UDPGW_URL="https://raw.githubusercontent.com/chanelog/max/main/udpgw"
-
 OHP_URL="https://github.com/chanelog/max/raw/main/ohpserver"
 WS_URL="https://raw.githubusercontent.com/chanelog/max/main/ws"
 WS_SERVICE_URL="https://raw.githubusercontent.com/chanelog/max/main/ws.service"
